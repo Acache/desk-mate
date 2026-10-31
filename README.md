@@ -274,14 +274,14 @@ Whatever comes back `false` and matters to you is your actionable blocker.
 
 | Item | Detail |
 |---|---|
-| Board | ESP32-C6-Touch-AMOLED-2.16 (480×480, SH8601 panel, FT5x06 touch) |
+| Board | ESP32-C6-Touch-AMOLED-2.16 (480×480, SH8601 driver, touch on I2C 0x5A) |
 | MCU | ESP32-C6 — Wi-Fi 6 (2.4 GHz) + BLE 5 |
 | PMIC | AXP2101 (battery gauge, power rails) |
 | Audio | ES7210 dual-mic ADC → I2S |
 | Storage | 16 MB flash, no-OTA partition scheme |
 
 Pin map: [`firmware/desk-mate-app/pinout.md`](firmware/desk-mate-app/pinout.md)
-Button semantics: [`firmware/desk-mate-app/button_plan.md`](firmware/desk-mate-app/button_plan.md)
+Buttons: BOOT = GPIO9 (restart), KEY = GPIO10 (spare), PWR = AXP2101 PEK — see `desk-mate-app.ino`.
 
 ---
 
@@ -318,7 +318,7 @@ Third-party Arduino libraries are **not vendored**. Install them as shown in Qui
 - **Bounded memory.** PCM ring of 64 frames, two 10-line draw buffers, 32 KiB LVGL pool —
   measured against real device heap rather than assumed.
 
-See `firmware/desk-mate-app/TODO.md` for current known gaps.
+Known gaps and open questions: see `spec/MASTER_SPEC.md` §12–13.
 
 ---
 

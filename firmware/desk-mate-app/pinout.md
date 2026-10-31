@@ -19,14 +19,14 @@
 | GPIO2 | SPI MISO | LCD / SD 卡共用 |
 | GPIO3 | SPI DATA3 | LCD |
 | GPIO4 | SPI DATA2 | LCD |
-| GPIO5 | 触摸 INT | CST9220 |
+| GPIO5 | 触摸 INT | 触摸 (I2C 0x5A) |
 | GPIO6 | SD CS | SD 卡 |
 | GPIO7 | I2C SCL | 共享（PMIC/IMU/RTC/音频） |
 | GPIO8 | I2C SDA | 共享（PMIC/IMU/RTC/音频） |
 | GPIO9 | BOOT 按键 | 输入 |
 | GPIO10 | KEY 按键 | 输入 |
-| GPIO11 | 触摸 RST | CST9220 |
-| GPIO15 | LCD CS | CO5300 |
+| GPIO11 | 触摸 RST | 触摸 (I2C 0x5A) |
+| GPIO15 | LCD CS | SH8601 |
 | GPIO16 | IMU INT1 | QMI8658 |
 | GPIO17 | IMU INT2 | QMI8658 |
 | GPIO18 | PMIC PEK | AXP2101 |
