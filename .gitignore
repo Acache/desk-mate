@@ -45,3 +45,6 @@ mac/bin/
 *.bak
 *.oldbak
 .DS_Store
+
+# 本地归档：原始对话记录（含个人信息，不入库）
+docs/archive/bili-chat-log-*.md
