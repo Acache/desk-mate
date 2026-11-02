@@ -5,6 +5,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 #include <freertos/task.h>
+#include <freertos/semphr.h>
 #include <Preferences.h>
 
 #include "audio_capture.h"
@@ -22,6 +23,14 @@ static volatile int s_owner_page = -1;
 static volatile bool s_started = false;
 static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
 static VoiceUiStatus s_ui = {};
+static SemaphoreHandle_t s_fsm_lock;
+static bool s_management=false,s_wait_release=false;
+static unsigned s_management_users=0;
+static int64_t s_input_fence=0,s_keys_up_at=0;
+static bool fsm_busy() {
+    return !(s_fsm.state==VOICE_STATE_READY || s_fsm.state==VOICE_STATE_OFFLINE ||
+        s_fsm.state==VOICE_STATE_CONNECTING || s_fsm.state==VOICE_STATE_RESULT);
+}
 
 static void ui_publish() {
     VoiceUiStatus snapshot = {};
@@ -110,6 +119,8 @@ static void audio_error(int code, const char *summary) {
 }
 
 static bool should_forward_input(voice_event_type_t type) {
+    if(s_management||s_wait_release)return false;
+    if(vc_transport_pending()&&s_fsm.state==VOICE_STATE_READY&&(type==VOICE_EV_A_DOWN||type==VOICE_EV_B_DOWN))return false;
     bool is_down = type == VOICE_EV_A_DOWN || type == VOICE_EV_B_DOWN;
     bool is_up = type == VOICE_EV_A_UP || type == VOICE_EV_B_UP;
     if (is_down) {
@@ -134,23 +145,39 @@ static void controller_task(void *arg) {
     bool announced = false;
     for (;;) {
         if (!announced) { announced = true; Serial.printf("VOICE: controller task running heap=%u\n", ESP.getFreeHeap()); }
+        xSemaphoreTake(s_fsm_lock,portMAX_DELAY);
+        if(s_wait_release&&!s_management){
+            if(digitalRead(9)==HIGH&&digitalRead(10)==HIGH){
+                if(!s_keys_up_at)s_keys_up_at=esp_timer_get_time();
+                if(esp_timer_get_time()-s_keys_up_at>=30000){s_wait_release=false;s_input_fence=esp_timer_get_time();}
+            }else s_keys_up_at=0;
+        }
         voice_event_t ev;
         while (xQueueReceive(s_events, &ev, 0) == pdTRUE) {
+            if(ev.type==VOICE_EV_HOST_CHANGED){
+                voice_fsm_io_t io=s_fsm.io;voice_fsm_init(&s_fsm,&io);s_owner_page=-1;
+                s_input_fence=esp_timer_get_time();continue;
+            }
             if (ev.type == VOICE_EV_A_DOWN || ev.type == VOICE_EV_A_UP ||
                 ev.type == VOICE_EV_B_DOWN || ev.type == VOICE_EV_B_UP) {
-                if (!should_forward_input(ev.type)) continue;
+                if (ev.stable_us<=s_input_fence || !should_forward_input(ev.type)) continue;
             }
             if (ev.type == VOICE_EV_C_SHORT) {
                 if (!(s_page == 2 || voice_fsm_is_capturing(&s_fsm))) continue;
             }
+            bool unknown=s_fsm.state==VOICE_STATE_OUTCOME_UNKNOWN_ACK;
             voice_fsm_handle(&s_fsm, &ev, esp_timer_get_time());
+            if(unknown&&s_fsm.state==VOICE_STATE_READY)vc_transport_ack_unknown();
         }
         int64_t now = esp_timer_get_time();
         if (now - last_tick >= 10000) {
             last_tick = now;
+            bool unknown=s_fsm.state==VOICE_STATE_OUTCOME_UNKNOWN_ACK;
             voice_fsm_tick(&s_fsm, now);
+            if(unknown&&s_fsm.state==VOICE_STATE_READY)vc_transport_ack_unknown();
         }
         ui_publish();
+        xSemaphoreGive(s_fsm_lock);
         vTaskDelay(pdMS_TO_TICKS(5));
     }
 }
@@ -167,6 +194,8 @@ bool vc_controller_begin() {
     Serial.printf("VOICE: controller begin heap=%u\n", ESP.getFreeHeap());
     vc_config_load(nullptr);
     pcm_ring_reset(&s_ring);
+    s_fsm_lock=xSemaphoreCreateMutex();
+    if(!s_fsm_lock)return false;
     s_events = xQueueCreate(24, sizeof(voice_event_t));
     s_actions = xQueueCreate(12, sizeof(voice_action_t));
     if (!s_events || !s_actions) return false;
@@ -222,7 +251,7 @@ void vc_controller_pmic_short() {
 }
 
 void vc_controller_feedback(const char *command_id, const char *rating,
-                            const char *dismissed_by, int touch_count, int countdown_ms) {
+                            const char *dismissed_by, int touch_count, int countdown_ms, const char *server_id) {
     if (!command_id || !command_id[0] || !rating || !rating[0]) return;
     voice_action_t a = {};
     a.type = VOICE_ACT_FEEDBACK;
@@ -232,6 +261,7 @@ void vc_controller_feedback(const char *command_id, const char *rating,
     // Durable one-slot queue: UI feedback must survive an offline WSS or reboot.
     Preferences prefs;
     if (prefs.begin("va_feedback", false)) {
+        prefs.putString("srv",server_id&&server_id[0]?server_id:vc_config_peek()->server_id);
         prefs.putString("cmd", command_id);
         prefs.putString("rating", rating);
         prefs.putString("dismissed", dismissed_by ? dismissed_by : "");
@@ -251,4 +281,20 @@ void vc_controller_read(VoiceUiStatus *out) {
 
 bool vc_controller_active_input() {
     return voice_fsm_is_capturing(&s_fsm);
+}
+
+bool vc_controller_busy() {
+    if(!s_fsm_lock)return false;
+    if(xSemaphoreTake(s_fsm_lock,pdMS_TO_TICKS(20))!=pdTRUE)return true;
+    bool busy=fsm_busy();xSemaphoreGive(s_fsm_lock);return busy;
+}
+bool vc_controller_management(bool open) {
+    if(!s_fsm_lock)return false;
+    if(xSemaphoreTake(s_fsm_lock,pdMS_TO_TICKS(20))!=pdTRUE)return false;
+    if(open&&(fsm_busy()||vc_transport_pending()||digitalRead(9)==LOW||digitalRead(10)==LOW)){
+        xSemaphoreGive(s_fsm_lock);return false;
+    }
+    if(open)s_management_users++;else if(s_management_users)s_management_users--;
+    s_management=s_management_users>0;s_wait_release=true;s_keys_up_at=0;s_owner_page=-1;s_input_fence=esp_timer_get_time();
+    xSemaphoreGive(s_fsm_lock);return true;
 }

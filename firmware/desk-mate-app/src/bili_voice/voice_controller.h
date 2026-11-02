@@ -27,8 +27,10 @@ void vc_controller_preinit_audio();
 void vc_controller_set_page(int page);
 void vc_controller_pmic_short();
 void vc_controller_feedback(const char *command_id, const char *rating,
-                            const char *dismissed_by, int touch_count, int countdown_ms);
+                            const char *dismissed_by, int touch_count, int countdown_ms, const char *server_id = nullptr);
 void vc_controller_read(VoiceUiStatus *out);
 bool vc_controller_active_input();
+bool vc_controller_busy();
+bool vc_controller_management(bool open);
 
 #endif

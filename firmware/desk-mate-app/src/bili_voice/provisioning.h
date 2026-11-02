@@ -26,5 +26,6 @@ void vc_provisioning_poll();
 void vc_config_set_time(int64_t unix_s);
 bool vc_config_clear_voice();
 void vc_time_apply();
+bool vc_config_activate(int slot);
 
 #endif

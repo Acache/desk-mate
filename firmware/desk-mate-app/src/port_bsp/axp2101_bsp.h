@@ -12,4 +12,5 @@ void Axp2101_SetAldo3(uint8_t vol);
 /* 返回电池电量百分比 0-100，<0 表示读取失败。实现在 axp2101_bsp.cpp */
 int PMU_GetBatteryPercent(void);
 void PMU_EnableButton(void);
-bool PMU_TakeShortPress(void);
+/* POWER_KEY_* flags from power_hold.h; one coherent, acknowledged snapshot. */
+uint8_t PMU_PollButton(void);

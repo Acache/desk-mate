@@ -50,7 +50,8 @@ typedef enum {
     VOICE_EV_REPLAY_READY,
     VOICE_EV_RESULT,
     VOICE_EV_ERROR,
-    VOICE_EV_TICK
+    VOICE_EV_TICK,
+    VOICE_EV_HOST_CHANGED
 } voice_event_type_t;
 
 typedef enum {

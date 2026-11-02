@@ -11,12 +11,17 @@
 #include <time.h>
 
 #include "voice_contracts.h"
+#include "voice_hosts.h"
+#include "voice_controller.h"
+#include "transport.h"
+#include "../media_ble/ble_manager.h"
 
 static const char *NVS_NS = "va_cfg";
 static VoiceConfig g_cfg;
 static bool g_loaded = false;
 static String g_line;
 static int g_bundle_remaining = 0;
+static int g_bundle_index = 0;
 static bool g_setup_mode = false;
 static uint32_t g_setup_deadline_ms = 0;
 static uint32_t g_last_bundle_rx_ms = 0;
@@ -120,23 +125,20 @@ static bool save_config(JsonDocument &doc) {
     if (port == 0) return false;
     if (trusted < 1700000000LL) return false;
 
-    Preferences prefs;
-    if (!prefs.begin(NVS_NS, false)) return false;
-    bool ok = true;
-    ok &= prefs.putString("dev_id", dev_id) > 0;
-    ok &= prefs.putString("srv_id", srv_id) > 0;
-    ok &= prefs.putString("token", token) > 0;
-    ok &= prefs.putString("tls", tls) > 0;
-    ok &= prefs.putString("ca", ca) > 0;
-    ok &= prefs.putString("ssid", ssid) >= 0;
-    ok &= prefs.putString("pass", password) >= 0;
-    ok &= prefs.putString("host", manual) >= 0;
-    ok &= prefs.putUShort("port", port) > 0;
-    ok &= prefs.putLong64("time", trusted) > 0;
-    prefs.end();
-    if (!ok) return false;
-    vc_config_load(&g_cfg);
-    return g_cfg.valid;
+    if (vc_controller_busy() || vc_transport_pending() || !vc_controller_management(true)) return false;
+    VoiceConfig *candidate=(VoiceConfig *)calloc(1,sizeof(VoiceConfig));
+    if(!candidate){vc_controller_management(false);return false;}
+    copy_field(candidate->device_id,sizeof(candidate->device_id),dev_id);
+    copy_field(candidate->server_id,sizeof(candidate->server_id),srv_id);
+    copy_field(candidate->token,sizeof(candidate->token),token);
+    copy_field(candidate->tls_name,sizeof(candidate->tls_name),tls);
+    copy_field(candidate->manual_host,sizeof(candidate->manual_host),manual);
+    copy_field(candidate->ca_pem,sizeof(candidate->ca_pem),ca);
+    copy_field(candidate->ssid,sizeof(candidate->ssid),ssid);
+    copy_field(candidate->password,sizeof(candidate->password),password);
+    candidate->port=port;candidate->trusted_time_unix_s=trusted;candidate->valid=true;
+    bool ok=vc_hosts_save(candidate,server["display_name"] | "");
+    free(candidate);vc_controller_management(false);return ok;
 }
 
 static void send_line(const char *fmt, ...) {
@@ -151,7 +153,7 @@ static void send_line(const char *fmt, ...) {
 
 static void release_bundle() {
     if (g_bundle) { free(g_bundle); g_bundle = nullptr; }
-    g_bundle_remaining = 0;
+    g_bundle_remaining = 0;g_bundle_index=0;
 }
 
 static void handle_bundle() {
@@ -163,8 +165,9 @@ static void handle_bundle() {
     if ((int)(doc["schema_version"] | 0) != 1) { send_line("VA_ERR SCHEMA"); release_bundle(); return; }
     if (!save_config(doc)) { send_line("VA_ERR CONFIG"); release_bundle(); return; }
     Serial.println("VA: config saved");
+    vc_config_set_time((int64_t)(doc["trusted_time_unix_s"] | 0));
     vc_time_apply();
-    send_line("VA_OK %s %s", g_cfg.device_id, g_cfg.server_id);
+    send_line("VA_OK %s %s", doc["device_id"].as<const char *>(), doc["server_id"].as<const char *>());
     Serial.printf("VA: paired device=%s server=%s tls=%s\n", g_cfg.device_id, g_cfg.server_id, g_cfg.tls_name);
     release_bundle();
 }
@@ -179,6 +182,7 @@ static void provisioning_task(void *arg) {
 
 void vc_provisioning_begin() {
     if (!g_loaded) vc_config_load(&g_cfg);
+    vc_hosts_init();
     // Single serial reader. The UI loop can be delayed by LVGL rendering, so
     // bundle bytes must be drained by a dedicated high-priority task.
     xTaskCreate(provisioning_task, "voice_provision", 4096, nullptr, 5, nullptr);
@@ -192,20 +196,42 @@ void vc_provisioning_poll() {
         if (c < 0) break;
         if (g_bundle_remaining > 0) {
             g_last_bundle_rx_ms = millis();
-            static int idx = 0;
+
             if (!g_bundle) { g_bundle_remaining = 0; g_setup_mode = false; continue; }
-            g_bundle[idx++] = (char)c;
-            g_bundle[idx] = 0;
+            g_bundle[g_bundle_index++] = (char)c;
+            g_bundle[g_bundle_index] = 0;
             g_bundle_remaining--;
             if (g_bundle_remaining == 0) {
                 handle_bundle();
                 g_setup_mode = false;
-                idx = 0;
+                g_bundle_index = 0;
             }
             continue;
         }
         if (c == '\n' || c == '\r') {
             if (g_line.length() > 0) {
+#ifdef DESKMATE_BLE_DIAGNOSTICS
+                if (g_line == "ble pair" || g_line == "ble cancel" || g_line == "ble disconnect" || g_line.startsWith("ble connect ")) {
+                    BleRequest request={};
+                    request.op=g_line=="ble pair"?BLE_CMD_PAIR:g_line=="ble cancel"?BLE_CMD_CANCEL:BLE_CMD_DISCONNECT;
+                    if(g_line.startsWith("ble connect ")) {
+                        BleSnapshot view; ble_manager_read(&view);
+                        int index=g_line.substring(12).toInt();
+                        if(index<0||index>=view.count) { send_line("BLE: invalid host"); g_line=""; continue; }
+                        request.op=BLE_CMD_CONNECT; request.type=view.hosts[index].type;
+                        snprintf(request.address,sizeof(request.address),"%s",view.hosts[index].address);
+                    }
+                    send_line("BLE: bench queued=%d",ble_manager_submit(&request));
+                } else
+#endif
+                if (g_line == "VA_BLE_CONNECT_SELECTED") {
+                    BleSnapshot view;ble_manager_read(&view);int index=view.selected;
+                    if(index<0||index>=view.count||vc_controller_busy()||vc_transport_pending())send_line("VA_BLE_BUSY");
+                    else {BleRequest request={};request.op=BLE_CMD_CONNECT;request.type=view.hosts[index].type;
+                        snprintf(request.address,sizeof(request.address),"%s",view.hosts[index].address);
+                        send_line("VA_BLE_QUEUED %d",ble_manager_submit(&request));}
+                    g_line="";continue;
+                }
                 if (g_line == "VA_SETUP") {
                     release_bundle();
                     g_setup_mode = true;
@@ -218,7 +244,7 @@ void vc_provisioning_poll() {
                     int len = g_line.substring(10).toInt();
                     if (len > 0 && len <= kBundleMax - 1) {
                         release_bundle();
-                        if (!g_bundle) g_bundle = (char *)malloc(kBundleMax);
+                        if (!g_bundle) g_bundle = (char *)malloc((size_t)len + 1);
                         if (!g_bundle) { send_line("VA_ERR NOMEM"); g_line = ""; continue; }
                         g_bundle_remaining = len;
                         g_bundle[0] = 0;
@@ -255,4 +281,10 @@ bool vc_config_clear_voice() {
     memset(&g_cfg, 0, sizeof(g_cfg));
     g_loaded = true;
     return ok;
+}
+
+bool vc_config_activate(int slot) {
+    if(slot<0){g_cfg.valid=false;vc_hosts_read_network(g_cfg.ssid,g_cfg.password);return true;}
+    VoiceConfig *next=(VoiceConfig *)malloc(sizeof(VoiceConfig));if(!next)return false;
+    bool ok=vc_hosts_load(slot,next);if(ok)g_cfg=*next;free(next);return ok;
 }

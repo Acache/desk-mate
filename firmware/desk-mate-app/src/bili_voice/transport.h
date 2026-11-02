@@ -12,6 +12,7 @@ bool vc_transport_begin(QueueHandle_t action_queue, QueueHandle_t event_queue, p
 bool vc_transport_connected();
 bool vc_transport_ready();
 bool vc_transport_pending();
+void vc_transport_ack_unknown();
 uint32_t vc_transport_generation();
 const char *vc_transport_status();
 

@@ -1,23 +1,35 @@
-# docs/ — 文档索引
+# 文档索引
 
-## 当前有效（以代码为准）
+> 更新：2026-11-01。B 站 R1 链路已打通，后续在三页固件基线上迭代。
 
-| 文档 | 内容 |
+## 阅读顺序
+
+| 文档 | 职责 |
 |---|---|
-| [`../README.md`](../README.md) | 项目总览、三页功能、构建/烧录/运行、路线图 |
-| [`../spec/MASTER_SPEC.md`](../spec/MASTER_SPEC.md) | 系统规格：设备↔主机协议、状态机、18 个动作、SQLite 表、已知缺口（§12）、开放问题（§13） |
-| [`../firmware/desk-mate-app/pinout.md`](../firmware/desk-mate-app/pinout.md) | 引脚与三个按键 |
-| [`../tools/lv_sim/README.md`](../tools/lv_sim/README.md) | LVGL 9 模拟器用法 |
+| [项目总览与启动](../README.md) | 功能、安装、构建、烧录和排障 |
+| [项目进展与迭代待办](STATUS.md) | 当前阶段、完成依据、能力边界和后续任务；待办统一在这里维护 |
+| [系统规格](../spec/MASTER_SPEC.md) | 协议、状态机、动作契约、存储与实际实现边界 |
+| [引脚与按键](../firmware/desk-mate-app/pinout.md) | GPIO、分页面按键行为及硬件注意事项 |
+| [模拟器用法](../tools/lv_sim/README.md) | LVGL 9 交互预览、LVGL 8 渲染检查、测试与截图 |
 
-## 归档（历史资料，不代表当前实现）
+## 功能文档
 
-| 文件 | 说明 |
+- [正式 BLE 语音桥接](BLE_VOICE.md)：共用媒体连接、凭据认证、BLE/Wi-Fi 选择与用户验收。
+
+- [蓝牙连接管理用法](BLUETOOTH.md)：配对、设备切换、改名、忘记与重连策略。
+- [BLE 语音数据实验与对端桥接](BLE_VOICE_LAB.md)：共用 HID 连接、吞吐/完整性测量、正常 Wi-Fi 路径与指令引擎分层。
+- [已确认的蓝牙管理设计](superpowers/specs/2026-11-01-bluetooth-manager-design.md) 与 [实施计划](superpowers/plans/2026-11-01-bluetooth-manager.md)。
+
+## 历史资料
+
+| 文档 | 使用方式 |
 |---|---|
-| [`archive/TODO-desk-mate-v1.md`](archive/TODO-desk-mate-v1.md) | 2026-05-31 的 v1 七项功能清单，全部标了 ✅。它描述的是已经下线的 v1 页面（桌宠/额度/ACP/蓝牙页），**不要当作现状**；当前待办看 `spec/MASTER_SPEC.md` §12–13 和 README 的 Roadmap |
-| [`archive/button-plan-desk-mate-v1.md`](archive/button-plan-desk-mate-v1.md) | 同时期的按键方案草稿。文中 GPIO0/GPIO9 自相矛盾，实际行为以 `firmware/desk-mate-app/desk-mate-app.ino` 为准（BOOT=GPIO9 重启、KEY=GPIO10、PWR=AXP2101 PEK） |
-| `archive/bili-chat-log-2026-10-17.md` | bili 项目 2026-10-15 ~ 10-17 的完整对话导出（2,622 行），包含语音控制方案的最早讨论、MVP 取舍、三页/按键语义等决策。**只在本地保留，未进 git**（含个人信息与无关任务，规则见 `.gitignore`） |
+| [v1 功能清单](archive/TODO-desk-mate-v1.md) | 2026-05-31 旧版页面记录；勾选不表示这些功能仍在当前固件中 |
+| [v1 按键方案](archive/button-plan-desk-mate-v1.md) | 历史草稿，包含 GPIO 冲突与已废弃按键语义；禁止直接照抄代码 |
+| 本地 `archive/bili-chat-log-2026-10-17.md` | 早期需求讨论原始导出，含无关任务与个人信息，由 .gitignore 排除，不提交、不复制全文 |
 
-## 已经丢失的
+早期对话中与当前项目持续相关的要求：沿用已购微雪 ESP32-C6 AMOLED 三按键硬件；保留计时器与媒体页；语音作为第三页；物理按住说话、松开后留取消机会。当前实现与依据见进展文档和系统规格。
 
-- **2026-10-17 写的原版 `MASTER_SPEC.md`（38KB）**：写在一个临时工作目录（`~/Downloads/voice-assistant-design/`），没有落盘到项目里，已无法恢复。现在 `spec/MASTER_SPEC.md` 是 2026-10-25 依据代码逐条重建的版本；早期的设计取舍只能从上面的 chat log 回溯。
-- bili 的 `docs/` 目录一直是空的，没有其它设计稿。
+2026-10-17 原版设计稿未在当前仓库找到完整文件，现有 MASTER_SPEC 于 2026-10-25 从代码重建。旧会话可补充设计背景，不把“当前未找到原文件”写成无法再次核验的绝对丢失结论。
+
+- [语音电脑管理](VOICE_COMPUTERS.md)：第 3 屏英文界面、最多 5 台 Mac、USB 追加授权、切换、网络与用户验收。

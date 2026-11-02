@@ -3,7 +3,7 @@ _lv_sim/
 _waveshare_examples/
 simulator/lv_port_pc_vscode/
 firmware/libraries/
-.venv/
+.venv
 
 # ---- 构建产物 ----
 build/

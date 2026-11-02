@@ -2,6 +2,9 @@
 #define DESKMATE_FOCUS_UI_H
 #include "lvgl.h"
 #include "focus_model.h"
+#include "power_ui.h"
+#include "voice_hosts_ui.h"
+#include "ble_ui.h"
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -43,7 +46,12 @@ static lv_obj_t *focus_mac_title, *focus_mac_status, *focus_mac_hint;
 static lv_obj_t *focus_mac_mode, *focus_mac_left, *focus_mac_right;
 static lv_obj_t *focus_dots[3], *focus_battery;
 static lv_obj_t *focus_bili_title, *focus_bili_state, *focus_bili_timer, *focus_bili_hint;
-static lv_obj_t *focus_bili_sec, *focus_bili_dec, *focus_bili_tenth;
+static lv_obj_t *focus_bili_voice_disc,*focus_bili_cancel_track,*focus_bili_cancel_fill,*focus_bili_footer;
+static char focus_feedback_origin[37];
+static float focus_wave_history[21],focus_wave_level;
+static uint32_t focus_wave_at;
+static void focus_voice_build(void);
+static void focus_voice_visibility(bool open);
 #define FOCUS_WAVE_BARS 21
 static lv_obj_t *focus_bili_wave[FOCUS_WAVE_BARS];
 static lv_obj_t *focus_bili_result, *focus_bili_mac, *focus_bili_dot;
@@ -75,6 +83,7 @@ static void focus_action(int action);
 static void focus_feedback_show(const char *command_id);
 static void focus_feedback_hide(const char *rating, const char *dismissed_by);
 static void focus_feedback_tick(void);
+static void focus_feedback_content_build(void);
 #if LVGL_VERSION_MAJOR >= 9
 #define FOCUS_ACTIVE_INDEV() lv_indev_active()
 #else
@@ -219,6 +228,7 @@ static void focus_preset_render(void) {
     }
 }
 static void focus_action(int action) {
+    if (bt_is_open() || vh_is_open()) return;
     static const int presets[3] = {5, 15, 25};
     uint32_t now = lv_tick_get();
     if (action == 4) {
@@ -257,7 +267,7 @@ static void focus_action(int action) {
     }
     focus_refresh();
 }
-/* Feedback overlay: one LVGL object set, reused for every terminal result. */
+/* Keep the overlay shell/badge; allocate feedback controls only while visible. */
 static void focus_feedback_send(const char *rating, const char *dismissed_by) {
     if (focus_feedback_sink && focus_feedback_command[0])
         focus_feedback_sink(focus_feedback_command, rating, dismissed_by,
@@ -288,7 +298,11 @@ static void focus_feedback_hide(const char *rating, const char *dismissed_by) {
     focus_feedback_visible = false;
     focus_feedback_selected = false;
     focus_feedback_held = false;
-    if (focus_feedback_overlay) lv_obj_add_flag(focus_feedback_overlay, LV_OBJ_FLAG_HIDDEN);
+    if (focus_feedback_overlay) {
+        lv_obj_add_flag(focus_feedback_overlay, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clean(focus_feedback_overlay);
+        focus_feedback_title=focus_feedback_count=focus_feedback_good=focus_feedback_bad=NULL;
+    }
 }
 static void focus_feedback_update(void) {
     if (!focus_feedback_visible || !focus_feedback_count) return;
@@ -335,8 +349,11 @@ static void focus_feedback_tick(void) {
 static void focus_feedback_show(const char *command_id) {
     if (!focus_feedback_overlay || !command_id || !command_id[0]) return;
     if (focus_feedback_visible) focus_feedback_hide("unfeedback", "replaced");
+    if (!focus_feedback_title) focus_feedback_content_build();
     bool new_command = strcmp(focus_feedback_command, command_id) != 0;
     snprintf(focus_feedback_command, sizeof(focus_feedback_command), "%s", command_id);
+    if(new_command&&vh_read){VoiceHostView v;vh_read(&v);int i=v.catalog.active;
+        snprintf(focus_feedback_origin,37,"%s",i>=0&&i<VH_CAPACITY?v.catalog.hosts[i].id:"");}
     snprintf(focus_feedback_last_command, sizeof(focus_feedback_last_command), "%s", command_id);
     if (new_command || focus_feedback_result_tick == 0)
         focus_feedback_result_tick = lv_tick_get();
@@ -389,13 +406,7 @@ static void focus_feedback_badge_event(lv_event_t *e) {
     if (focus_feedback_last_command[0] && !focus_feedback_visible)
         focus_feedback_show(focus_feedback_last_command);
 }
-static void focus_feedback_build(lv_obj_t *screen) {
-    focus_feedback_overlay = focus_object(screen, 0, 0, 480, 480);
-    lv_obj_set_style_bg_color(focus_feedback_overlay, lv_color_hex(0x080A0B), 0);
-    lv_obj_set_style_bg_opa(focus_feedback_overlay, LV_OPA_80, 0);
-    lv_obj_add_flag(focus_feedback_overlay, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(focus_feedback_overlay, focus_feedback_overlay_event, LV_EVENT_ALL, NULL);
-    lv_obj_add_flag(focus_feedback_overlay, LV_OBJ_FLAG_HIDDEN);
+static void focus_feedback_content_build(void) {
     focus_feedback_title = focus_label(focus_feedback_overlay, "WAS THIS CORRECT?", 112,
                                        &lv_font_montserrat_24, FOCUS_INK);
     lv_obj_set_width(focus_feedback_title, 420); lv_obj_set_x(focus_feedback_title, 30);
@@ -423,6 +434,14 @@ static void focus_feedback_build(lv_obj_t *screen) {
     lv_label_set_text(bl, "BAD"); lv_obj_set_style_text_font(bl, &lv_font_montserrat_24, 0);
     lv_obj_set_style_text_color(bl, lv_color_hex(0xE7A6A0), 0); lv_obj_center(bl);
     lv_obj_clear_flag(bl, LV_OBJ_FLAG_CLICKABLE);
+}
+static void focus_feedback_build(lv_obj_t *screen) {
+    focus_feedback_overlay = focus_object(screen, 0, 0, 480, 480);
+    lv_obj_set_style_bg_color(focus_feedback_overlay, lv_color_hex(0x080A0B), 0);
+    lv_obj_set_style_bg_opa(focus_feedback_overlay, LV_OPA_80, 0);
+    lv_obj_add_flag(focus_feedback_overlay, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(focus_feedback_overlay, focus_feedback_overlay_event, LV_EVENT_ALL, NULL);
+    lv_obj_add_flag(focus_feedback_overlay, LV_OBJ_FLAG_HIDDEN);
     focus_feedback_badge = focus_object(screen, 330, 430, 138, 34);
     lv_obj_set_style_radius(focus_feedback_badge, 17, 0);
     lv_obj_set_style_bg_color(focus_feedback_badge, lv_color_hex(0x24201A), 0);
@@ -436,8 +455,33 @@ static void focus_feedback_build(lv_obj_t *screen) {
     lv_obj_clear_flag(bd, LV_OBJ_FLAG_CLICKABLE);
 }
 
+static void focus_bili_wave_build(void) {
+    lv_obj_t *p = focus_pages[PAGE_BILI];
+    for (int i = 0; i < FOCUS_WAVE_BARS; ++i) {
+        lv_obj_t *b = focus_object(p, 97 + i * 14, 336, 5, 14);
+        lv_obj_set_style_radius(b, 3, 0);
+        /* Low-saturation amber/orange; center bars are brighter than edges. */
+        lv_obj_set_style_bg_color(b, lv_color_hex(i % 2 ? 0xD3B58D : 0xC4A276), 0);
+        int dist = i < (FOCUS_WAVE_BARS / 2) ? (FOCUS_WAVE_BARS / 2 - i)
+                                            : (i - FOCUS_WAVE_BARS / 2);
+        int alpha = 200 - dist * 16;
+        if (alpha < 30) alpha = 30;
+        lv_obj_set_style_bg_opa(b, (lv_opa_t)alpha, 0);
+        lv_obj_clear_flag(b, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_flag(b, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_background(b);
+        focus_bili_wave[i] = b;
+    }
+}
+
 static void focus_bili_wave_update(const FocusBiliStatus *st) {
-    bool show = st && st->state == 4; /* RECORDING */
+    bool show = st && st->state == 4 && focus_page == PAGE_BILI; /* RECORDING */
+    if (show && !focus_bili_wave[0]) focus_bili_wave_build();
+    if (!show && focus_bili_wave[0]) {
+        for (int i=0; i<FOCUS_WAVE_BARS; ++i) {
+            BT_DELETE(focus_bili_wave[i]); focus_bili_wave[i]=NULL;
+        }
+    }
     uint32_t now = lv_tick_get();
     float level = st ? st->rms : 0.0f;
     if (level < 0.0f) level = 0.0f;
@@ -452,11 +496,15 @@ static void focus_bili_wave_update(const FocusBiliStatus *st) {
             continue;
         }
         lv_obj_clear_flag(b, LV_OBJ_FLAG_HIDDEN);
-        float phase = (now % 900) / 140.0f + i * 0.65f;
-        float weight = 0.35f + 0.65f * (0.5f + 0.5f * sinf(phase));
-        int h = 10 + (int)(level * 102.0f * weight);
-        lv_obj_set_height(b, h);
-        lv_obj_set_y(b, 330 - h);
+        if(i==0&&now-focus_wave_at>=45){
+            focus_wave_at=now;
+            float target=level<0.04f?0.0f:sqrtf(level);
+            focus_wave_level+=(target-focus_wave_level)*(target>focus_wave_level?0.8f:0.25f);
+            memmove(focus_wave_history,focus_wave_history+1,sizeof(float)*(FOCUS_WAVE_BARS-1));
+            focus_wave_history[FOCUS_WAVE_BARS-1]=focus_wave_level;
+        }
+        int h=4+(int)(focus_wave_history[i]*68.0f);
+        lv_obj_set_height(b,h);lv_obj_set_y(b,290-h/2);
     }
 }
 
@@ -485,6 +533,8 @@ static void focus_bili_refresh(void) {
     if (st.state == 9 && st.result != 0 && st.result != 4 && st.command_id[0] &&
         strcmp(focus_feedback_command, st.command_id) != 0 &&
         strcmp(focus_feedback_last_command, st.command_id) != 0) {
+        if(vh_read){VoiceHostView v;vh_read(&v);int i=v.catalog.active;
+            snprintf(focus_feedback_origin,37,"%s",i>=0&&i<VH_CAPACITY?v.catalog.hosts[i].id:"");}
         snprintf(focus_feedback_last_command, sizeof(focus_feedback_last_command), "%s", st.command_id);
         focus_feedback_result_tick = lv_tick_get();
         if (focus_page == PAGE_BILI) focus_feedback_show(st.command_id);
@@ -496,10 +546,10 @@ static void focus_bili_refresh(void) {
     char timer[24] = "--";
     switch (st.state) {
     case 1: state_text = "CONNECTING"; hint = "LOOKING FOR THE MAC"; break;
-    case 2: state_text = "READY"; hint = "KEY HOLD: TALK\nB: REPLAY   PWR: BACK"; break;
+    case 2: state_text = "Ready to talk"; hint = "HOLD KEY / RELEASE TO SEND"; break;
     case 3: state_text = "LISTEN"; hint = "HOLD THE KEY"; break;
-    case 4: state_text = "RECORDING"; hint = "RELEASE TO SEND\nPWR: CANCEL"; break;
-    case 5: state_text = "RELEASED"; hint = "PRESS KEY AGAIN TO CANCEL"; break;
+    case 4: state_text = "LISTENING"; hint = "RELEASE KEY TO SEND"; break;
+    case 5: state_text = "Ready to send"; hint = "PRESS KEY AGAIN TO CANCEL"; break;
     case 6: state_text = "SENDING"; hint = "MAC IS THINKING"; break;
     case 7: state_text = "THINKING"; hint = "MAC IS WORKING"; break;
     case 8: state_text = "CHECKING"; hint = "ASKING THE MAC"; break;
@@ -516,12 +566,12 @@ static void focus_bili_refresh(void) {
     }
     if (st.state == 4) {
         unsigned ms = st.recording_ms;
-        snprintf(timer, sizeof(timer), "%02u.%01u", ms / 1000, (ms % 1000) / 100);
+        snprintf(timer,sizeof(timer),"%02u:%02u",ms/60000,(ms/1000)%60);
     } else if (st.state == 5) {
         unsigned ms = st.cancel_remaining_ms;
-        snprintf(timer, sizeof(timer), "%01u.%01u", ms / 1000, (ms % 1000) / 100);
+        snprintf(timer,sizeof(timer),"%u.%us",ms/1000,(ms%1000)/100);
     } else if (st.state == 2) {
-        snprintf(timer, sizeof(timer), "TALK");
+        snprintf(timer, sizeof(timer), "Talk");
     } else if (st.state == 4) {
         snprintf(timer, sizeof(timer), "REC");
     }
@@ -530,9 +580,15 @@ static void focus_bili_refresh(void) {
     lv_obj_set_style_text_font(focus_bili_timer, &lv_font_montserrat_48, 0);
     /* Do not use transform_zoom here: LVGL 8 allocates a temporary draw layer
      * for scaled text, which is unsafe at the ~10 KB heap seen while recording. */
+    if(focus_bili_voice_disc){
+        if(st.state==2)lv_obj_clear_flag(focus_bili_voice_disc,LV_OBJ_FLAG_HIDDEN);
+        else lv_obj_add_flag(focus_bili_voice_disc,LV_OBJ_FLAG_HIDDEN);
+    }
+    lv_obj_set_y(focus_bili_timer,st.state==4?198:st.state==2?244:224);
     lv_label_set_text(focus_bili_state, state_text);
     lv_label_set_text(focus_bili_timer, timer);
     lv_label_set_text(focus_bili_hint, hint);
+    if(focus_bili_footer)lv_label_set_text(focus_bili_footer,st.state>=3&&st.state<=8?"TARGET LOCKED / PWR CANCEL":"BOOT REPLAY / PWR BACK");
     const char *detail = "";
     if (st.result == 1) {
         if (strstr(st.summary, "ALREADY PLAYING")) detail = "ALREADY PLAYING";
@@ -562,13 +618,24 @@ static void focus_bili_refresh(void) {
     } else {
         detail = "";
     }
-    lv_label_set_text(focus_bili_result, detail);
-    char mac[96];
-    snprintf(mac, sizeof(mac), "%s  /  %s", st.ready ? "MAC READY" : "MAC OFFLINE",
-             st.transport[0] ? st.transport : "OFFLINE");
-    lv_label_set_text(focus_bili_mac, mac);
-    lv_obj_set_style_bg_color(focus_bili_dot,
-        lv_color_hex(st.ready ? 0x73C991 : st.connected ? FOCUS_AMBER : 0x6B4A44), 0);
+    if(st.state==9&&st.command_id[0]&&strcmp(vh_recent_id,st.command_id)){
+        snprintf(vh_recent_id,37,"%s",st.command_id);snprintf(vh_recent_result,sizeof(vh_recent_result),"%s",detail);
+        if(vh_read){VoiceHostView v;vh_read(&v);int i=v.catalog.active;if(i>=0&&i<VH_CAPACITY)vh_recent_host=v.catalog.hosts[i];}
+    }
+    char recent[80];snprintf(recent,sizeof(recent),"LAST: %s >",vh_recent_result);
+    lv_label_set_text(focus_bili_result,st.state==2&&vh_recent_id[0]?recent:detail);
+    if(focus_bili_cancel_track){
+        if(st.state==5){lv_obj_clear_flag(focus_bili_cancel_track,LV_OBJ_FLAG_HIDDEN);unsigned ms=st.cancel_remaining_ms>840?840:st.cancel_remaining_ms;lv_obj_set_width(focus_bili_cancel_fill,(int)(280*ms/840));}
+        else lv_obj_add_flag(focus_bili_cancel_track,LV_OBJ_FLAG_HIDDEN);
+    }
+    VoiceHostView hosts;memset(&hosts,0,sizeof(hosts));
+    const char *name="YOUR COMPUTER";
+    if(vh_read){vh_read(&hosts);int i=hosts.catalog.active;if(i>=0&&i<VH_CAPACITY&&hosts.catalog.hosts[i].present)name=hosts.catalog.hosts[i].name;}
+    char mac[96];snprintf(mac,sizeof(mac),"%s / %s",name,st.ready?"Ready":st.connected?"Connecting":"Offline");
+    lv_label_set_text(focus_bili_mac,mac);
+    bool busy=st.state>=3&&st.state<=8;
+    if(focus_bili_dot){if(busy)lv_obj_clear_state(focus_bili_dot,LV_STATE_PRESSED);}
+
 }
 
 static void focus_refresh(void) {
@@ -595,24 +662,38 @@ static void focus_refresh(void) {
         focus_last_finished = focus_timer.finished;
         int progress = focus_timer.duration_ms ?
             (int)((uint64_t)focus_timer.remaining_ms * 1000 / focus_timer.duration_ms) : 0;
-        lv_arc_set_value(focus_arcs[0], progress); lv_arc_set_value(focus_arcs[1], progress);
-        if (focus_timer.remaining_ms != focus_timer.duration_ms || focus_timer.running || focus_timer.finished)
-            lv_obj_clear_flag(focus_arcs[1], LV_OBJ_FLAG_HIDDEN);
-        else lv_obj_add_flag(focus_arcs[1], LV_OBJ_FLAG_HIDDEN);
+        lv_arc_set_value(focus_arcs[0], progress);
+        if (focus_arcs[1]) lv_arc_set_value(focus_arcs[1], progress);
+        if (focus_arcs[1]) {
+            if (focus_timer.remaining_ms != focus_timer.duration_ms || focus_timer.running || focus_timer.finished)
+                lv_obj_clear_flag(focus_arcs[1], LV_OBJ_FLAG_HIDDEN);
+            else lv_obj_add_flag(focus_arcs[1], LV_OBJ_FLAG_HIDDEN);
+        }
     }
     if (focus_hint_until && (int32_t)(focus_hint_until - now) <= 0) {
         focus_hint_until = 0; lv_obj_set_style_text_opa(focus_control_hint, LV_OPA_TRANSP, 0);
     }
-    lv_label_set_text(focus_mac_title, focus_connected ? "Ready." : "Hello, Mac.");
-    lv_label_set_text(focus_mac_hint, focus_connected ? "Your music. Within reach." : "Pair Desk-Mate in Mac Bluetooth settings");
+    if (!bt_is_open()) {
+    if (bt_read) {
+        BleSnapshot v; bt_read(&v);
+        const char *name = v.current >= 0 && v.current < v.count ? v.hosts[v.current].name :
+            v.selected >= 0 && v.selected < v.count ? v.hosts[v.selected].name : "Your devices.";
+        lv_label_set_text(focus_mac_title, name);
+        lv_label_set_text(focus_mac_hint, v.count ? "Tap host name to manage" : "Tap host name to pair");
+        if (!focus_feedback_until) lv_label_set_text(focus_mac_status, ble_state_label(v.state));
+    } else {
+        lv_label_set_text(focus_mac_title, focus_connected ? "Ready." : "Your devices.");
+        lv_label_set_text(focus_mac_hint, "Manage Bluetooth connections");
+    }
     if (!focus_feedback_until || (int32_t)(now - focus_feedback_until) >= 0) {
         focus_feedback_until = 0;
-        lv_label_set_text(focus_mac_status, focus_connected ? "BLUETOOTH CONNECTED" : "WAITING FOR CONNECTION");
+        if (!bt_read) lv_label_set_text(focus_mac_status, focus_connected ? "BLUETOOTH CONNECTED" : "WAITING FOR CONNECTION");
     }
     lv_label_set_text(focus_mac_mode, focus_volume ? "VOLUME  /  switch" : "MUSIC  /  switch");
     lv_label_set_text(focus_mac_left, focus_volume ? "-" : LV_SYMBOL_PREV);
     lv_label_set_text(focus_mac_right, focus_volume ? "+" : LV_SYMBOL_NEXT);
     lv_obj_center(focus_mac_left); lv_obj_center(focus_mac_right);
+    }
     for (int i = 0; i < PAGE_COUNT; ++i) {
         if (!focus_dots[i]) continue;
         lv_obj_set_style_bg_color(focus_dots[i], lv_color_hex(i == focus_page ? FOCUS_INK : 0x484B4D), 0);
@@ -620,11 +701,74 @@ static void focus_refresh(void) {
     }
     focus_bili_refresh();
     focus_feedback_tick();
+    bt_tick();
+    vh_tick();
 }
 static void focus_ui_set_bili_source(FocusReadBili reader) { focus_read_bili = reader; }
 static void focus_ui_set_feedback_sink(FocusFeedbackSink sink) { focus_feedback_sink = sink; }
 static void focus_tick(lv_timer_t *t) { (void)t; focus_refresh(); }
+static void focus_media_build(void) {
+    focus_last_seconds=UINT32_MAX;
+    lv_obj_t *p = focus_pages[PAGE_MAC];
+    focus_arcs[1] = focus_arc(p, 9, 9, 462, 2, false);
+    lv_obj_t *bt_entry = focus_button(p, "BLUETOOTH  /  manage", 100, 68, 280, 54, FOCUS_BLUE, 100);
+    lv_obj_set_style_text_font(bt_entry, &lv_font_montserrat_16, 0);
+    lv_obj_center(bt_entry);
+    lv_obj_add_event_cb(lv_obj_get_parent(bt_entry), bt_open_event, LV_EVENT_CLICKED, NULL);
+    focus_mac_title = focus_label(p, "Your devices.", 154, &lv_font_montserrat_48, FOCUS_INK);
+    lv_label_set_long_mode(focus_mac_title, LV_LABEL_LONG_DOT);
+    lv_obj_add_flag(focus_mac_title, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(focus_mac_title, bt_open_event, LV_EVENT_CLICKED, NULL);
+    focus_mac_status = focus_label(p, "", 222, &lv_font_montserrat_14, FOCUS_BLUE);
+    focus_mac_left = focus_button(p, LV_SYMBOL_PREV, 48, 251, 108, 108, FOCUS_BLUE, -1);
+    focus_button(p, LV_SYMBOL_PLAY " / " LV_SYMBOL_PAUSE, 169, 245, 142, 120, FOCUS_BLUE, 0);
+    focus_mac_right = focus_button(p, LV_SYMBOL_NEXT, 324, 251, 108, 108, FOCUS_BLUE, 1);
+    focus_mac_mode = focus_button(p, "MUSIC  /  switch", 100, 368, 280, 56, FOCUS_MUTED, 5);
+    focus_mac_hint = focus_label(p, "", 434, &lv_font_montserrat_14, FOCUS_MUTED);
+}
+static void focus_media_visibility(bool open) {
+    if(open) {
+        lv_obj_clean(focus_pages[PAGE_MAC]);
+        focus_arcs[1] = NULL;
+        focus_mac_title=focus_mac_status=focus_mac_hint=NULL;
+        focus_mac_mode=focus_mac_left=focus_mac_right=NULL;
+    } else {
+        focus_media_build();
+        focus_feedback_until=0;
+    }
+}
+static void focus_voice_history(lv_event_t *e){if(lv_event_get_code(e)==LV_EVENT_CLICKED&&vh_recent_id[0]&&vh_open())vh_draw(VH_UI_HISTORY);}
+static void focus_voice_build(void) {
+    lv_obj_t *p=focus_pages[PAGE_BILI];
+    focus_bili_title=focus_label(p,"VOICE / BILIBILI",59,&lv_font_montserrat_16,FOCUS_MUTED);
+    focus_bili_dot=focus_object(p,72,84,336,50);
+    lv_obj_set_style_radius(focus_bili_dot,25,0);lv_obj_set_style_bg_color(focus_bili_dot,lv_color_hex(0x151B20),0);lv_obj_set_style_bg_opa(focus_bili_dot,LV_OPA_COVER,0);
+    lv_obj_add_flag(focus_bili_dot,LV_OBJ_FLAG_CLICKABLE);lv_obj_add_event_cb(focus_bili_dot,vh_open_event,LV_EVENT_CLICKED,NULL);
+    focus_bili_mac=lv_label_create(focus_bili_dot);lv_obj_set_width(focus_bili_mac,310);lv_label_set_long_mode(focus_bili_mac,LV_LABEL_LONG_DOT);lv_label_set_text(focus_bili_mac,"YOUR COMPUTER / MANAGE");
+    lv_obj_set_style_text_font(focus_bili_mac,&lv_font_montserrat_20,0);lv_obj_set_style_text_color(focus_bili_mac,lv_color_hex(FOCUS_BLUE),0);lv_obj_set_style_text_align(focus_bili_mac,LV_TEXT_ALIGN_CENTER,0);lv_obj_center(focus_bili_mac);lv_obj_clear_flag(focus_bili_mac,LV_OBJ_FLAG_CLICKABLE);
+    focus_bili_state=focus_label(p,"OFFLINE",158,&lv_font_montserrat_28,FOCUS_INK);
+    focus_bili_voice_disc=focus_object(p,170,199,140,140);lv_obj_set_style_radius(focus_bili_voice_disc,70,0);
+    lv_obj_set_style_bg_color(focus_bili_voice_disc,lv_color_hex(0x151B20),0);lv_obj_set_style_bg_opa(focus_bili_voice_disc,LV_OPA_COVER,0);
+    lv_obj_set_style_border_width(focus_bili_voice_disc,1,0);lv_obj_set_style_border_color(focus_bili_voice_disc,lv_color_hex(FOCUS_BLUE),0);lv_obj_clear_flag(focus_bili_voice_disc,LV_OBJ_FLAG_CLICKABLE);
+    focus_bili_timer=focus_label(p,"TALK",224,&lv_font_montserrat_48,FOCUS_BLUE);
+    focus_bili_cancel_track=focus_object(p,100,310,280,4);lv_obj_set_style_bg_color(focus_bili_cancel_track,lv_color_hex(0x33373B),0);lv_obj_set_style_bg_opa(focus_bili_cancel_track,LV_OPA_COVER,0);
+    focus_bili_cancel_fill=focus_object(focus_bili_cancel_track,0,0,280,4);lv_obj_set_style_bg_color(focus_bili_cancel_fill,lv_color_hex(FOCUS_AMBER),0);lv_obj_set_style_bg_opa(focus_bili_cancel_fill,LV_OPA_COVER,0);lv_obj_add_flag(focus_bili_cancel_track,LV_OBJ_FLAG_HIDDEN);
+    focus_bili_hint=focus_label(p,"CONNECT YOUR COMPUTER",350,&lv_font_montserrat_16,FOCUS_MUTED);
+    focus_bili_result=focus_label(p,"",394,&lv_font_montserrat_20,FOCUS_BLUE);lv_label_set_long_mode(focus_bili_result,LV_LABEL_LONG_DOT);lv_obj_add_flag(focus_bili_result,LV_OBJ_FLAG_CLICKABLE);lv_obj_add_event_cb(focus_bili_result,focus_voice_history,LV_EVENT_CLICKED,NULL);
+    focus_bili_footer=focus_label(p,"BOOT REPLAY / PWR BACK",420,&lv_font_montserrat_16,FOCUS_MUTED);
+}
+static void focus_voice_visibility(bool open) {
+    if(open){
+        if(focus_feedback_visible)focus_feedback_hide("unfeedback","host_manager");
+        focus_feedback_badge_until=0;if(focus_feedback_badge)lv_obj_add_flag(focus_feedback_badge,LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clean(focus_pages[PAGE_BILI]);
+        focus_bili_state=focus_bili_timer=focus_bili_hint=focus_bili_mac=focus_bili_dot=focus_bili_result=focus_bili_title=focus_bili_voice_disc=focus_bili_cancel_track=focus_bili_cancel_fill=focus_bili_footer=NULL;
+        memset(focus_bili_wave,0,sizeof(focus_bili_wave));memset(focus_wave_history,0,sizeof(focus_wave_history));focus_wave_level=0;
+    }else {focus_voice_build();focus_bili_refresh();}
+}
 static void focus_ui_build(lv_obj_t *screen, FocusSendMedia send_media, FocusReadBattery read_battery) {
+    power_ui_init();
+    bt_screen = screen;
     focus_timer = focus_timer_init(); focus_send_media = send_media; focus_read_battery = read_battery;
     focus_page = 0; focus_volume = false; focus_connected = false; focus_next_battery_at = 0;
     lv_obj_remove_style_all(screen); lv_obj_set_style_bg_color(screen, lv_color_hex(0), 0);
@@ -632,6 +776,7 @@ static void focus_ui_build(lv_obj_t *screen, FocusSendMedia send_media, FocusRea
     focus_pager = focus_object(screen, 0, 0, 480, 480);
     lv_obj_add_flag(focus_pager, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_SCROLL_ONE |
         LV_OBJ_FLAG_SCROLL_MOMENTUM | LV_OBJ_FLAG_SCROLL_ELASTIC);
+    bt_pager = focus_pager;
     lv_obj_set_scroll_dir(focus_pager, LV_DIR_HOR); lv_obj_set_scroll_snap_x(focus_pager, LV_SCROLL_SNAP_CENTER);
     lv_obj_set_scrollbar_mode(focus_pager, LV_SCROLLBAR_MODE_OFF); lv_obj_set_style_anim_time(focus_pager, 280, 0);
     lv_obj_add_event_cb(focus_pager, focus_scroll, LV_EVENT_SCROLL, NULL);
@@ -681,64 +826,10 @@ static void focus_ui_build(lv_obj_t *screen, FocusSendMedia send_media, FocusRea
     }
     lv_obj_t *preset_hint = focus_label(focus_preset_overlay, "KEEP HOLDING TO ADVANCE", 205, &lv_font_montserrat_14, FOCUS_MUTED);
     lv_obj_set_width(preset_hint, 300); lv_obj_set_x(preset_hint, 22); lv_obj_add_flag(focus_preset_overlay, LV_OBJ_FLAG_HIDDEN);
-    p = focus_pages[1];
-    focus_arcs[1] = focus_arc(p, 9, 9, 462, 2, false);
-    focus_label(p, "M A C  C O N T R O L", 86, &lv_font_montserrat_20, FOCUS_BLUE);
-    focus_mac_title = focus_label(p, "Hello, Mac.", 154, &lv_font_montserrat_48, FOCUS_INK);
-    focus_mac_status = focus_label(p, "", 222, &lv_font_montserrat_14, FOCUS_BLUE);
-    focus_mac_left = focus_button(p, LV_SYMBOL_PREV, 48, 251, 108, 108, FOCUS_BLUE, -1);
-    focus_button(p, LV_SYMBOL_PLAY " / " LV_SYMBOL_PAUSE, 169, 245, 142, 120, FOCUS_BLUE, 0);
-    focus_mac_right = focus_button(p, LV_SYMBOL_NEXT, 324, 251, 108, 108, FOCUS_BLUE, 1);
-    focus_mac_mode = focus_button(p, "MUSIC  /  switch", 88, 382, 304, 62, FOCUS_MUTED, 5);
-    focus_mac_hint = focus_label(p, "", 451, &lv_font_montserrat_14, FOCUS_MUTED);
-    p = focus_pages[PAGE_BILI];
-    focus_bili_title = focus_label(p, "B I L I B I L I   V O I C E", 58, &lv_font_montserrat_20, FOCUS_BLUE);
-    focus_bili_dot = focus_object(p, 236, 102, 9, 9);
-    lv_obj_set_style_radius(focus_bili_dot, 5, 0);
-    lv_obj_set_style_bg_color(focus_bili_dot, lv_color_hex(0x6B4A44), 0);
-    lv_obj_set_style_bg_opa(focus_bili_dot, LV_OPA_COVER, 0);
-    lv_obj_clear_flag(focus_bili_dot, LV_OBJ_FLAG_CLICKABLE);
-    focus_bili_state = focus_label(p, "OFFLINE", 132, &lv_font_montserrat_48, FOCUS_INK);
-    /* focus_font_120 only contains digits and ':'; "TALK"/"--" would render
-     * as missing-glyph boxes. Numeric recording/cancel states switch to it. */
-    focus_bili_timer = focus_label(p, "TALK", 218, &lv_font_montserrat_48, FOCUS_AMBER);
-    focus_bili_hint = focus_label(p, "VOICE SERVICE OFFLINE\nOLD PAGES STILL WORK", 360, &lv_font_montserrat_16, FOCUS_MUTED);
-    lv_obj_set_style_text_line_space(focus_bili_hint, 6, 0);
-    /* Large readout: use the existing digit-only 120 px font, a separate
-     * Montserrat decimal point, and no transform layer. */
-    focus_bili_sec = focus_label(p, "", 182, &focus_font_120, FOCUS_AMBER);
-    lv_obj_set_width(focus_bili_sec, 150); lv_obj_set_x(focus_bili_sec, 102);
-    lv_obj_set_style_text_align(focus_bili_sec, LV_TEXT_ALIGN_RIGHT, 0);
-    focus_bili_dec = focus_label(p, ".", 244, &lv_font_montserrat_48, FOCUS_AMBER);
-    lv_obj_set_width(focus_bili_dec, 30); lv_obj_set_x(focus_bili_dec, 264);
-    focus_bili_tenth = focus_label(p, "", 182, &focus_font_120, FOCUS_AMBER);
-    lv_obj_set_width(focus_bili_tenth, 90); lv_obj_set_x(focus_bili_tenth, 303);
-    lv_obj_set_style_text_align(focus_bili_tenth, LV_TEXT_ALIGN_LEFT, 0);
-    for (int i = 0; i < 3; ++i) {
-        lv_obj_t *o = i == 0 ? focus_bili_sec : i == 1 ? focus_bili_dec : focus_bili_tenth;
-        lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_clear_flag(o, LV_OBJ_FLAG_CLICKABLE);
-    }
-    for (int i = 0; i < FOCUS_WAVE_BARS; ++i) {
-        lv_obj_t *b = focus_object(p, 97 + i * 14, 336, 5, 14);
-        lv_obj_set_style_radius(b, 3, 0);
-        /* Low-saturation amber/orange; center bars are brighter than edges. */
-        lv_obj_set_style_bg_color(b, lv_color_hex(i % 2 ? 0xD3B58D : 0xC4A276), 0);
-        int dist = i < (FOCUS_WAVE_BARS / 2) ? (FOCUS_WAVE_BARS / 2 - i)
-                                            : (i - FOCUS_WAVE_BARS / 2);
-        int alpha = 200 - dist * 16;
-        if (alpha < 30) alpha = 30;
-        lv_obj_set_style_bg_opa(b, (lv_opa_t)alpha, 0);
-        lv_obj_clear_flag(b, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_add_flag(b, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_move_background(b);
-        focus_bili_wave[i] = b;
-    }
-    focus_bili_result = focus_label(p, "", 412, &lv_font_montserrat_16, FOCUS_BLUE);
-    lv_obj_set_width(focus_bili_result, 400); lv_obj_set_x(focus_bili_result, 40);
-    lv_label_set_long_mode(focus_bili_result, LV_LABEL_LONG_DOT);
-    focus_bili_mac = focus_label(p, "MAC OFFLINE  /  OFFLINE", 450, &lv_font_montserrat_14, FOCUS_MUTED);
-    lv_obj_set_width(focus_bili_mac, 420); lv_obj_set_x(focus_bili_mac, 30);
+    focus_media_build();
+    bt_visibility = focus_media_visibility;
+    focus_voice_build();
+    vh_parent=focus_pages[PAGE_BILI];vh_pager=focus_pager;vh_visibility=focus_voice_visibility;
     focus_feedback_build(screen);
     for (int i = 0; i < PAGE_COUNT; ++i) {
         focus_dots[i] = focus_object(screen, 216 + i * 20, 24, 7, 7);
@@ -751,6 +842,6 @@ static void focus_ui_build(lv_obj_t *screen, FocusSendMedia send_media, FocusRea
     lv_obj_set_width(focus_battery, 64); lv_obj_set_x(focus_battery, 396);
     lv_obj_set_style_text_align(focus_battery, LV_TEXT_ALIGN_RIGHT, 0); lv_obj_move_foreground(focus_battery);
     focus_dots_until = lv_tick_get() + 3000; focus_hint_until = lv_tick_get() + 5000;
-    lv_obj_update_layout(screen); focus_refresh(); lv_timer_create(focus_tick, 100, NULL);
+    lv_obj_update_layout(screen); focus_refresh(); lv_timer_create(focus_tick, 50, NULL);
 }
 #endif

@@ -112,7 +112,7 @@ def cmd_run(args) -> int:
     db.close()
     if args.port:
         cfg.port = args.port
-    run_server(cfg)
+    run_server(cfg, ble_address=args.ble_address)
     return 0
 
 
@@ -290,6 +290,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("run", help="run the authenticated WSS service")
     p.add_argument("--port", type=int)
+    p.add_argument("--ble-address", help="Desk-Mate Bluetooth address (CoreBluetooth UUID on macOS)")
     p.set_defaults(func=cmd_run)
 
     p = sub.add_parser("status", help="show devices and recent commands")

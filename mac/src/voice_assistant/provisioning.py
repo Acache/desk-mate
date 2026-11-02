@@ -77,6 +77,7 @@ def build_bundle(
         "server": {
             "ca_pem": ca_pem,
             "tls_name": cfg.server.tls_name,
+            "display_name": __import__("socket").gethostname().split(".")[0][:32],
             "port": cfg.port,
             "manual_host": manual_host or "",
         },

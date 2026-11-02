@@ -1,0 +1,2 @@
+# Optional BLE companion and data laboratory runtime.
+bleak==3.0.2

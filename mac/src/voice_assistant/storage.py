@@ -135,6 +135,14 @@ class Database:
             row = self._conn.execute("SELECT 1 FROM devices WHERE id=? AND revoked_at IS NULL", (device_id,)).fetchone()
         return row is not None
 
+    def ble_auth_key(self, device_id: str) -> bytes | None:
+        """Secret equivalent of the USB token; never serialize or log this value."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT token_hash FROM devices WHERE id=? AND revoked_at IS NULL", (device_id,)
+            ).fetchone()
+        return bytes.fromhex(row["token_hash"]) if row else None
+
     def authenticate_device(self, device_id: str, token: str) -> bool:
         with self._lock:
             row = self._conn.execute(

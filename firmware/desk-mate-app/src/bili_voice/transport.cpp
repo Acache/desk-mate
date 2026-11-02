@@ -1,10 +1,18 @@
 #include "transport.h"
+#include "../media_ble/ble_voice.h"
+#include "../media_ble/ble_voice_bindings.h"
+#include "../media_ble/ble_manager.h"
+#include <mbedtls/md.h>
 
 #include <ArduinoJson.h>
 #include <ESPmDNS.h>
 #include <NetworkClientSecure.h>
 #include <Preferences.h>
 #include <WiFi.h>
+#include <WebServer.h>
+#include "voice_hosts.h"
+#include "voice_host_model.h"
+#include "voice_controller.h"
 #include <esp_heap_caps.h>
 #include <esp_random.h>
 #include <esp_timer.h>
@@ -22,7 +30,21 @@ static volatile bool s_connected = false;
 static volatile bool s_ready = false;
 static volatile uint32_t s_generation = 0;
 static volatile bool s_pending = false;
+static volatile bool s_ack_unknown=false;
+void vc_transport_ack_unknown(){s_ack_unknown=true;}
 static char s_status[64] = "OFFLINE";
+static QueueHandle_t s_host_requests;
+static VoiceHostCatalog s_hosts;
+static VoiceHostView s_host_view;
+static portMUX_TYPE s_host_mux=portMUX_INITIALIZER_UNLOCKED;
+static bool s_ble_mode=true;
+static bool s_paused=false,s_network_setup=false,s_switch_reset=false;
+static uint32_t s_switch_until=0,s_retry_at=0,s_setup_until=0;
+static char s_host_message[64];
+static WebServer *s_setup_server;
+static bool s_network_saved=false,s_wifi_force=true;
+static void host_switch_finish(bool success);
+
 
 static const char *WS_PATH = "/v1/remote";
 static const char *WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
@@ -69,6 +91,7 @@ static bool send_doc(JsonDocument &doc);
  * a reboot before the WSS link is available; the server is idempotent. */
 static bool s_fb_pending = false;
 static char s_fb_command[37] = {};
+static char s_fb_server[37] = {};
 static char s_fb_rating[16] = {};
 static char s_fb_dismissed[24] = {};
 static int s_fb_touches = 0;
@@ -77,6 +100,7 @@ static int s_fb_countdown = 0;
 static void load_feedback_nvs() {
     Preferences prefs;
     if (!prefs.begin("va_feedback", true)) return;
+    snprintf(s_fb_server,sizeof(s_fb_server),"%s",prefs.getString("srv",vc_config_peek()->server_id).c_str());
     String cmd = prefs.getString("cmd", "");
     String rating = prefs.getString("rating", "");
     String dismissed = prefs.getString("dismissed", "");
@@ -93,6 +117,7 @@ static void load_feedback_nvs() {
 static void save_feedback_nvs() {
     Preferences prefs;
     if (!prefs.begin("va_feedback", false)) return;
+    prefs.putString("srv",s_fb_server);
     prefs.putString("cmd", s_fb_command);
     prefs.putString("rating", s_fb_rating);
     prefs.putString("dismissed", s_fb_dismissed);
@@ -106,7 +131,7 @@ static void clear_feedback_nvs() {
     s_fb_pending = false;
 }
 static bool send_feedback_doc() {
-    if (!s_fb_pending || !s_connected || !s_ts.hello_done) return false;
+    if (!s_fb_pending || !s_connected || !s_ts.hello_done || strcmp(s_fb_server,vc_config_peek()->server_id)) return false;
     JsonDocument doc;
     doc["v"] = 1;
     doc["type"] = "feedback";
@@ -164,6 +189,7 @@ static bool ws_write_all(const uint8_t *data, size_t len, uint32_t timeout_ms = 
 }
 
 static bool ws_send_frame(uint8_t opcode, const uint8_t *payload, size_t len) {
+    if(s_ble_mode)return (opcode==1||opcode==2)&&ble_voice_send(opcode,payload,len);
     static uint8_t frame[8 + VOICE_MAX_CONTROL_BYTES];
     if (len > VOICE_MAX_CONTROL_BYTES) return false;
     uint8_t header[14];
@@ -192,7 +218,8 @@ static bool ws_send_text(const char *text) {
 }
 
 static bool send_doc(JsonDocument &doc) {
-    char buf[VOICE_MAX_CONTROL_BYTES + 1];
+    // Serialization is non-reentrant and owned by this transport task.
+    static char buf[VOICE_MAX_CONTROL_BYTES + 1];
     size_t n = serializeJson(doc, buf, sizeof(buf));
     if (n == 0 || n >= sizeof(buf)) {
         Serial.printf("VOICE: send_doc serialize failed n=%u heap=%u\n", (unsigned)n, ESP.getFreeHeap());
@@ -299,7 +326,7 @@ static bool connect_ws(const VoiceConfig &cfg) {
         int n = MDNS.queryService("voice-assistant", "tcp");
         for (int i = 0; i < n; ++i) {
             String sid = MDNS.txt(i, "server_id");
-            if (sid.length() == 0 || sid == cfg.server_id) {
+            if (sid == cfg.server_id) {
                 ip = MDNS.address(i);
                 port = MDNS.port(i);
                 if ((uint32_t)ip != 0) break;
@@ -472,7 +499,7 @@ static void send_begin(const voice_action_t &a) {
 }
 
 static void send_seal() {
-    if (!s_ts.begin_ack || s_ts.seal_sent) return;
+    if (!s_ts.begin_ack || s_ts.seal_sent || (s_ble_mode&&!ble_voice_writable())) return;
     finish_sha();
     JsonDocument doc;
     doc["v"] = 1;
@@ -491,7 +518,7 @@ static void send_seal() {
 }
 
 static void send_commit(bool replay) {
-    if (replay && s_ts.sha256[0] == 0) return;
+    if (!s_ts.command_id[0] || !s_ts.sha256[0] || s_ts.commit_sent || (!replay&&!s_ts.seal_ack)) return;
     if (!replay && s_ts.sha_active) finish_sha();
     const VoiceConfig *cfg = vc_config_peek();
     save_pending(s_ts.command_id, s_ts.sha256, cfg->server_id);
@@ -515,10 +542,11 @@ static void send_cancel(const char *reason) {
     doc["msg_id"] = 5;
     doc["command_id"] = s_ts.command_id;
     doc["reason"] = reason ? reason : "user";
-    send_doc(doc);
+    if(!send_doc(doc)){s_connected=false;s_client.stop();}
 }
 
 static void send_feedback(const voice_action_t &a) {
+    if(strcmp(a.command_id,s_fb_command))return;
     char work[sizeof(a.summary)];
     snprintf(work, sizeof(work), "%s", a.summary);
     char *rating = work;
@@ -545,6 +573,7 @@ static void send_feedback(const voice_action_t &a) {
 }
 
 static void send_status() {
+    if(s_ts.pending.exists&&strcmp(s_ts.pending.server_id,vc_config_peek()->server_id))return;
     JsonDocument doc;
     doc["v"] = 1;
     doc["type"] = "status";
@@ -582,10 +611,11 @@ static void drain_ring() {
     // than real time instead of bursting the entire ring into TLS; this keeps
     // the server's receive/ack loop responsive and prevents PCM ring overflow.
     if (s_ts.last_send_ms != 0 && millis() - s_ts.last_send_ms < 10) return;
+    if(s_ble_mode&&!ble_voice_writable())return;
     uint8_t frame[VOICE_FRAME_BYTES];
     uint16_t len = 0;
     int sent_this_round = 0;
-    while (pcm_ring_pop(s_ring, frame, &len) && sent_this_round < 1) {
+    while (sent_this_round < 1 && pcm_ring_pop(s_ring, frame, &len)) {
         if (len == 0 || len > VOICE_FRAME_BYTES) return;
         uint8_t msg[8 + VOICE_FRAME_BYTES];
         msg[0] = (uint8_t)(s_ts.frame_count & 0xff);
@@ -621,6 +651,7 @@ static void drain_ring() {
 }
 
 static void process_action(const voice_action_t &a) {
+    if((a.type==VOICE_ACT_COMMIT||a.type==VOICE_ACT_REPLAY_COMMIT||a.type==VOICE_ACT_SEAL)&&strcmp(a.command_id,s_ts.command_id))return;
     switch (a.type) {
     case VOICE_ACT_BEGIN: send_begin(a); break;
     case VOICE_ACT_SEAL: s_ts.seal_pending = true; if (pcm_ring_used(s_ring) == 0) send_seal(); break;
@@ -701,10 +732,12 @@ static void handle_text(const char *text, size_t len) {
         s_ts.hello_ready = doc["ready"] | false;
         s_ready = s_ts.hello_ready;
         if (s_ts.hello_ready) {
+            if(s_hosts.switching)host_switch_finish(true);
+            if(s_switch_reset){post_event(VOICE_EV_HOST_CHANGED);s_switch_reset=false;}
             set_status("READY");
             post_event(VOICE_EV_TRANSPORT_READY);
             if (s_fb_pending) send_feedback_doc();
-            if (s_ts.pending.exists) {
+            if (s_ts.pending.exists && !strcmp(s_ts.pending.server_id,vc_config_peek()->server_id)) {
                 s_ts.pending_query = true;
                 send_status();
             }
@@ -814,104 +847,193 @@ static void receive_ws() {
     }
 }
 
-static bool wifi_connect(const VoiceConfig &cfg) {
-    if (strlen(cfg.ssid) == 0) {
-        set_status("AP_MODE");
-        WiFi.mode(WIFI_AP);
-        WiFi.softAP("Desk-Mate-Voice", "deskmate");
-        return true;
-    }
-    if (WiFi.status() == WL_CONNECTED) return true;
-    set_status("WIFI_CONNECTING");
-    WiFi.mode(WIFI_STA);
-    WiFi.setSleep(false);
-    WiFi.begin(cfg.ssid, cfg.password);
-    uint32_t start = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - start < 20000) delay(100);
-    if (WiFi.status() != WL_CONNECTED) {
-        set_status("WIFI_LOST");
-        return false;
-    }
-    Serial.printf("VOICE: WiFi %s\n", WiFi.localIP().toString().c_str());
-    return true;
+static void host_disconnect() {
+    if(s_ble_mode)ble_voice_reset();
+    ble_voice_audio(false);xQueueReset(s_actions);pcm_ring_reset(s_ring);
+    s_connected=s_ready=false;s_client.stop();reset_ws_rx();
+    s_ts.hello_done=s_ts.hello_ready=false;
+    post_event(VOICE_EV_TRANSPORT_LOST);
 }
-
+static void refresh_host_metadata() {
+    VoiceHostCatalog stored;vc_hosts_catalog(&stored);
+    memcpy(s_hosts.hosts,stored.hosts,sizeof(stored.hosts));s_hosts.preferred=stored.preferred;
+    s_hosts.revision=stored.revision;
+}
+static void publish_host_view() {
+    refresh_host_metadata();VoiceHostView v={};v.catalog=s_hosts;v.ble_mode=s_ble_mode;
+    v.wifi=WiFi.status()==WL_CONNECTED;v.connected=s_connected;v.ready=s_ready&&!s_hosts.switching;
+    v.paused=s_paused;v.network_setup=s_network_setup;
+    v.command_busy=vc_controller_busy()||s_pending;
+    snprintf(v.ssid,sizeof(v.ssid),"%s",vc_config_peek()->ssid);
+    snprintf(v.status,sizeof(v.status),"%s",s_status);
+    snprintf(v.message,sizeof(v.message),"%s",s_host_message);
+    vc_hosts_added(v.added_id);v.provision_revision=vc_hosts_credentials_revision();
+    portENTER_CRITICAL(&s_host_mux);s_host_view=v;portEXIT_CRITICAL(&s_host_mux);
+}
+static void host_switch_finish(bool success) {
+    vh_finish(&s_hosts,success);
+    if(success){if(s_ble_mode||vc_hosts_remember(s_hosts.active))s_host_message[0]=0;else snprintf(s_host_message,sizeof(s_host_message),"Connected; last target could not be saved");return;}
+    host_disconnect();vc_config_activate(s_hosts.active);s_switch_reset=true;s_retry_at=millis();
+    snprintf(s_host_message,sizeof(s_host_message),"Switch failed; previous target kept");
+    set_status(s_hosts.active>=0?"RESTORING_PREVIOUS":"NO_COMPUTER");
+}
+static void stop_network_setup() {
+    if(s_setup_server){s_setup_server->stop();delete s_setup_server;s_setup_server=nullptr;}
+    s_network_setup=false;WiFi.softAPdisconnect(true);WiFi.disconnect();WiFi.mode(WIFI_STA);s_wifi_force=true;
+    vc_config_activate(s_hosts.active);s_retry_at=millis();
+}
+static void start_network_setup() {
+    host_disconnect();s_network_setup=true;s_setup_until=millis()+120000;s_network_saved=false;
+    WiFi.mode(WIFI_AP_STA);WiFi.softAP("Desk-Mate-Voice","deskmate");
+    s_setup_server=new WebServer(80);
+    s_setup_server->on("/",HTTP_GET,[]{
+        s_setup_server->send(200,"text/html",
+            "<!doctype html><meta name='viewport' content='width=device-width'><title>Desk-Mate Wi-Fi</title>"
+            "<h1>Connect Desk-Mate</h1><form method='post' action='/wifi'><label>2.4GHz Wi-Fi name "
+            "<input name='ssid' maxlength='32' required></label><br><label>Password "
+            "<input name='password' type='password' maxlength='64'></label><br><button>Save Wi-Fi</button></form>");
+    });
+    s_setup_server->on("/wifi",HTTP_POST,[]{
+        String ssid=s_setup_server->arg("ssid"),password=s_setup_server->arg("password");
+        if(!vc_hosts_network(ssid.c_str(),password.c_str())){s_setup_server->send(400,"text/plain","Invalid Wi-Fi settings or save failed");return;}
+        s_setup_server->send(200,"text/plain","Saved. Desk-Mate will reconnect. Computer authorizations are kept.");s_network_saved=true;
+    });
+    s_setup_server->begin();set_status("WIFI_SETUP");
+}
+static void host_request(const VoiceHostRequest &r) {
+    if(vc_controller_busy()||s_pending||s_hosts.switching){snprintf(s_host_message,sizeof(s_host_message),"Wait for the current command or connection");return;}
+    refresh_host_metadata();int slot=vh_find(&s_hosts,r.id);
+    s_host_message[0]=0;
+    if(r.op==VH_TRANSPORT_BLE||r.op==VH_TRANSPORT_WIFI){
+        if(s_network_setup)stop_network_setup();host_disconnect();
+        s_ble_mode=r.op==VH_TRANSPORT_BLE;s_paused=false;ble_voice_enable(s_ble_mode);
+        Preferences prefs;if(prefs.begin("va_link",false)){prefs.putBool("ble",s_ble_mode);prefs.end();}
+        if(!s_ble_mode){VoiceHostCatalog stored;vc_hosts_catalog(&stored);s_hosts.active=s_hosts.target=stored.active;vc_config_activate(stored.active);s_wifi_force=true;}
+        else {WiFi.disconnect();WiFi.mode(WIFI_OFF);ble_voice_reset();}
+        s_switch_reset=true;return;
+    }
+    if(r.op==VH_SETUP_WIFI){if(!s_network_setup)start_network_setup();return;}
+    if(r.op==VH_CANCEL_SETUP){if(s_network_setup)stop_network_setup();return;}
+    if(r.op==VH_RETRY_WIFI){
+        if(s_network_setup)stop_network_setup();host_disconnect();WiFi.disconnect();s_wifi_force=true;s_retry_at=millis();return;
+    }
+    if(slot<0){snprintf(s_host_message,sizeof(s_host_message),"Computer no longer saved");return;}
+    if(r.op==VH_CONNECT&&s_ble_mode){
+        BleSnapshot snap;ble_manager_read(&snap);bool found=false;
+        for(int i=0;i<snap.count;i++){char bound[37];if(bv_binding_get(snap.hosts[i].address,snap.hosts[i].type,bound)&&!strcmp(bound,r.id)){
+            BleRequest req={};req.op=BLE_CMD_CONNECT;strlcpy(req.address,snap.hosts[i].address,sizeof(req.address));req.type=snap.hosts[i].type;
+            if(ble_manager_submit(&req)){host_disconnect();s_paused=false;s_switch_reset=true;found=true;}break;
+        }}
+        if(!found)snprintf(s_host_message,sizeof(s_host_message),"Connect this Mac on page 2; start its assistant");return;
+    }
+    if(r.op==VH_CONNECT){
+        if(s_network_setup)stop_network_setup();
+        if(!vh_start(&s_hosts,r.id,false))return;
+        host_disconnect();s_paused=false;s_switch_reset=true;
+        xQueueReset(s_actions);pcm_ring_reset(s_ring);s_ts.command_id[0]=0;s_ts.sha256[0]=0;
+        if(!vc_config_activate(slot)){host_switch_finish(false);return;}
+        s_switch_until=millis()+20000;s_retry_at=millis();set_status("SWITCHING");return;
+    }
+    if(r.op==VH_DISCONNECT){if(slot==s_hosts.active){host_disconnect();s_paused=true;set_status("PAUSED");}return;}
+    if(r.op==VH_FORGET&&slot==s_hosts.active){host_disconnect();s_paused=true;s_switch_reset=true;post_event(VOICE_EV_HOST_CHANGED);}
+    if(r.op==VH_FORGET)bv_binding_remove_server(r.id);
+    if(!vc_hosts_edit(&r)){snprintf(s_host_message,sizeof(s_host_message),"Could not save computer settings");return;}
+    if(r.op==VH_FORGET&&slot==s_hosts.active){s_hosts.active=s_hosts.target=-1;vc_config_activate(-1);set_status("NO_COMPUTER");}
+    refresh_host_metadata();
+}
+static bool wifi_connect(const VoiceConfig &cfg) {
+    if(WiFi.status()==WL_CONNECTED)return true;
+    static uint32_t attempt_at=0;static bool started=false;static char attempted_ssid[33];
+    if(!cfg.ssid[0]){set_status("WIFI_NOT_CONFIGURED");return false;}
+    if(s_wifi_force||!started||strcmp(attempted_ssid,cfg.ssid)||millis()-attempt_at>=20000){
+        s_wifi_force=false;snprintf(attempted_ssid,sizeof(attempted_ssid),"%s",cfg.ssid);
+        attempt_at=millis();started=true;WiFi.mode(WIFI_STA);WiFi.setSleep(false);WiFi.begin(cfg.ssid,cfg.password);
+    }
+    set_status("WIFI_CONNECTING");return false;
+}
+static void service_session(){
+    if(s_ts.hello_done){
+        voice_action_t action;while(xQueueReceive(s_actions,&action,0)==pdTRUE){
+            if(action.type==VOICE_ACT_FEEDBACK)load_feedback_nvs();
+            process_action(action);
+        }
+        if(s_ts.seal_pending&&pcm_ring_used(s_ring)==0&&!s_ts.seal_sent)send_seal();
+        drain_ring();
+        if(millis()-s_ts.ping_ms>=5000){
+            s_ts.ping_ms=millis();
+            if(millis()-s_ts.last_pong_ms>16000)host_disconnect();
+            else {JsonDocument ping;ping["v"]=1;ping["type"]="ping";ping["msg_id"]=100;send_doc(ping);}
+        }
+    }
+    if(!s_connected){if(s_ble_mode)ble_voice_reset();s_ready=false;post_event(VOICE_EV_TRANSPORT_LOST);s_retry_at=millis()+1000;}
+    if(!s_ts.hello_done&&millis()-s_ts.connect_ms>10000){host_disconnect();if(s_hosts.switching)host_switch_finish(false);}
+}
+#include "ble_session_impl.h"
 static void transport_task(void *arg) {
-    (void)arg;
-    vc_config_load(nullptr);
-    const VoiceConfig *cfg = vc_config_peek();
-    vc_time_apply();
-    uint32_t backoff = 1000;
-    if (!cfg->valid) {
-        set_status("UNPAIRED");
-        for (;;) {
-            vc_config_load(nullptr);
-            cfg = vc_config_peek();
-            if (cfg->valid) break;
-            vTaskDelay(pdMS_TO_TICKS(200));
-        }
-        set_status("CONFIGURED");
-        vc_time_apply();
-    }
+    (void)arg;vc_hosts_catalog(&s_hosts);vc_config_activate(s_hosts.active);vc_time_apply();
+    {Preferences prefs;if(prefs.begin("va_link",true)){s_ble_mode=prefs.getBool("ble",true);prefs.end();}}
+    ble_voice_enable(s_ble_mode);
     load_pending();
-    MDNS.begin("desk-mate-voice");
-    for (;;) {
-        if (!wifi_connect(*cfg)) {
-            vTaskDelay(pdMS_TO_TICKS(backoff));
-            backoff = backoff < 30000 ? backoff * 2 : 30000;
-            continue;
-        }
-        if (!connect_ws(*cfg)) {
-            vTaskDelay(pdMS_TO_TICKS(backoff));
-            backoff = backoff < 30000 ? backoff * 2 : 30000;
-            continue;
-        }
-        backoff = 1000;
-        s_ts.last_pong_ms = millis();
-        send_hello(*cfg);
-        s_ts.connect_ms = millis();
-        while (s_connected) {
-            receive_ws();
-            if (s_ts.hello_done) {
-                voice_action_t action;
-                while (xQueueReceive(s_actions, &action, 0) == pdTRUE) {
-                    process_action(action);
-                }
-                if (s_ts.seal_pending && pcm_ring_used(s_ring) == 0 && !s_ts.seal_sent) send_seal();
-                drain_ring();
-                // Do not abort a capture merely because append_ack is late.
-                // TCP/TLS send failures and the 16 s pong watchdog detect a
-                // genuinely dead link; a slow ack must not cancel audio that
-                // the server may already be staging.
-                if (millis() - s_ts.ping_ms >= 5000) {
-                    s_ts.ping_ms = millis();
-                    if (millis() - s_ts.last_pong_ms > 16000) {
-                        s_connected = false;
-                        s_client.stop();
-                    } else {
-                        JsonDocument ping;
-                        ping["v"] = 1;
-                        ping["type"] = "ping";
-                        ping["msg_id"] = 100;
-                        send_doc(ping);
-                    }
-                }
-            }
-            if (millis() - s_ts.connect_ms > 300000) {
-                s_connected = false;
-                s_client.stop();
-            }
-            delay(2);
-        }
-        s_ready = false;
-        set_status("OFFLINE");
-        post_event(VOICE_EV_TRANSPORT_LOST);
-        vTaskDelay(pdMS_TO_TICKS(backoff));
-        backoff = backoff < 30000 ? backoff * 2 : 30000;
+    if(s_pending){int origin=vh_find(&s_hosts,s_ts.pending.server_id);
+        if(origin>=0){s_hosts.active=s_hosts.target=origin;vc_config_activate(origin);}
+        else {s_paused=true;set_status("PENDING_HOST_MISSING");}
     }
+    uint32_t recovery_since=millis();bool recovery_notice=false;
+    MDNS.begin("desk-mate-voice");
+    uint32_t credential_revision=vc_hosts_credentials_revision();uint32_t published=0;
+    for(;;) {
+        if(s_ack_unknown){s_ack_unknown=false;clear_pending();s_host_message[0]=0;}
+        if(s_pending&&!recovery_notice&&millis()-recovery_since>30000){
+            recovery_notice=true;post_event(VOICE_EV_RESULT,VOICE_RESULT_UNKNOWN,0,"Check original Mac; KEY acknowledges");
+            snprintf(s_host_message,sizeof(s_host_message),"Check original Mac; KEY acknowledges");
+        }
+        VoiceHostRequest request;while(xQueueReceive(s_host_requests,&request,0)==pdTRUE)host_request(request);
+        if(credential_revision!=vc_hosts_credentials_revision()&&!s_hosts.switching&&!vc_controller_busy()&&!s_pending){
+            credential_revision=vc_hosts_credentials_revision();refresh_host_metadata();
+            VoiceHostCatalog stored;vc_hosts_catalog(&stored);
+            char added[37];vc_hosts_added(added);
+            if(s_hosts.active<0&&stored.active>=0){s_hosts.active=s_hosts.target=stored.active;s_paused=false;}
+            if(s_hosts.active>=0&&(!vc_config_peek()->valid||!strcmp(added,s_hosts.hosts[s_hosts.active].id))){
+                host_disconnect();vc_config_activate(s_hosts.active);s_switch_reset=true;s_retry_at=millis();
+            }
+        }
+        if(s_network_setup){
+            s_setup_server->handleClient();
+            if(s_network_saved||(int32_t)(millis()-s_setup_until)>=0)stop_network_setup();
+        }else if(s_ble_mode){
+            poll_ble_session();if(s_connected)service_session();ble_voice_audio(s_connected&&s_ts.command_active&&!s_ts.seal_sent);
+        }else {
+            bool network_ready=wifi_connect(*vc_config_peek());
+            if(!network_ready&&s_connected)host_disconnect();
+            if(s_paused||!vc_config_peek()->valid){if(network_ready)set_status(s_hosts.active>=0?"PAUSED":"NO_COMPUTER");}
+            else {
+            if(s_hosts.switching&&(int32_t)(millis()-s_switch_until)>=0)host_switch_finish(false);
+            if(!s_connected){
+                if(network_ready&&(int32_t)(millis()-s_retry_at)>=0){
+                    if(connect_ws(*vc_config_peek())){s_ts.last_pong_ms=millis();load_feedback_nvs();send_hello(*vc_config_peek());s_ts.connect_ms=millis();}
+                    else {s_retry_at=millis()+3000;if(s_hosts.switching)host_switch_finish(false);}
+                }
+            }else {
+                receive_ws();
+                service_session();
+            }
+        }
+        }
+        if(millis()-published>=100){published=millis();publish_host_view();}
+        static uint32_t stack_log_at=0;
+        if(millis()-stack_log_at>=10000){stack_log_at=millis();Serial.printf("VOICE: stack_min=%u heap=%u generation=%lu\n",(unsigned)uxTaskGetStackHighWaterMark(nullptr),ESP.getFreeHeap(),(unsigned long)s_generation);}
+        vTaskDelay(pdMS_TO_TICKS(5));
+    }
+}
+void vc_host_read(VoiceHostView *out){if(!out)return;portENTER_CRITICAL(&s_host_mux);*out=s_host_view;portEXIT_CRITICAL(&s_host_mux);}
+bool vc_host_submit(const VoiceHostRequest *r){
+    if(!r||!s_host_requests||vc_controller_busy()||s_pending)return false;
+    return xQueueSend(s_host_requests,r,0)==pdTRUE;
 }
 
 bool vc_transport_begin(QueueHandle_t action_queue, QueueHandle_t event_queue, pcm_ring_t *ring) {
+    s_host_requests=xQueueCreate(4,sizeof(VoiceHostRequest));
+    if(!s_host_requests)return false;
     load_feedback_nvs();
     s_actions = action_queue;
     s_events = event_queue;

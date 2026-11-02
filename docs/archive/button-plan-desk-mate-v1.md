@@ -1,5 +1,7 @@
 # 物理按键功能方案
 
+> 历史草稿：下文 GPIO0/GPIO9、KEY 引脚及重启语义存在冲突，不能照抄。当前实现为 BOOT=GPIO9、KEY=GPIO10，按页面分配动作，见 [引脚与按键](../../firmware/desk-mate-app/pinout.md)。
+
 > 微雪 ESP32-C6-Touch-AMOLED-2.16
 
 ## 硬件现状

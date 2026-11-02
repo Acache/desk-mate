@@ -1,9 +1,8 @@
 # MASTER_SPEC — Desk-Mate 语音助手系统规格
 
-> **重建说明（2026-10-25）**：本文件原稿（38KB）写于 `$WORKSPACE_DIR/` 临时目录，未落盘到项目，**已丢失**。
-> 本版由**现有代码反推重建**（`mac/src/voice_assistant/` + `firmware/desk-mate-app/` + `README.md`），
-> 所有常量、枚举、schema 均从源码逐条核对，**代码是唯一事实来源**。
-> 标注 `⚠️ 待确认` 的地方是文档与代码不一致、或缺少原始决策记录的地方。
+> 本规格于 2026-10-25 依据代码重建，2026-11-01 结合合并后的源码、历史讨论和运行台账修订。
+> 原版设计稿的完整文件未在当前仓库定位；历史会话仅补充设计背景。代码定义当前实现，完成状态与后续待办统一见 [项目进展](../docs/STATUS.md)。
+> **当前阶段：B 站 R1 链路已打通，进入更新迭代；协议中声明的 R2 动作不等于已交付能力。**
 
 ---
 
@@ -33,38 +32,35 @@
 | 项 | 值 |
 |---|---|
 | 型号 | **微雪 Waveshare ESP32-C6-Touch-AMOLED-2.16** |
-| 显示 | 480×480 AMOLED，CO5300 驱动，GPIO15 = LCD CS |
-| 触摸 | CST9220（GPIO5 = INT，GPIO11 = RST）|
+| 显示 | 480×480 AMOLED，代码使用 SH8601 驱动，GPIO15 = LCD CS |
+| 触摸 | I2C 地址 0x5A（GPIO5 = INT，GPIO11 = RST）；以当前触摸驱动为准|
 | 麦克风 | **ES7210** 双麦，I2S（GPIO19 MCLK / 20 SCLK / 21 DIN / 22 LRCK / 23 DOUT）|
 | 电源 | AXP2101 PMIC（GPIO7/8 = I2C SCL/SDA，0x34）|
 | IMU | QMI8658（GPIO16 = INT1）|
 | RTC | PCF85063（I2C）|
 | 存储 | SPI SD 卡（GPIO0 CLK / 1 MOSI / 2 MISO / 3 DATA3 / 4 DATA2 / 6 CS）|
 
-> ⚠️ **待确认（文档冲突）**：
-> - `firmware/desk-mate-app/TODO.md` 与 `button_plan.md` / `pinout.md` 写的是 **2.16 寸**
-> - 但项目早期记忆里是 **1.43 寸 / 466×466**（另一块板）
-> - `README.md` 写 "480×480 AMOLED" —— **与 2.16 寸一致**
-> → **以代码与 README 为准 = 2.16 寸 480×480**；若实际持有 1.43 寸板子，则显示层需重做。
+> 本仓库目标为 **ESP32-C6-Touch-AMOLED-2.16，480×480，三物理按键**。旧资料中的 1.43 寸、466×466、CO5300 和触摸录音描述不作为当前基线，也不重复列为阻断已交付 R1 的未知项。
 
 ### 2.2 三个物理按键
 
-| 按键 | GPIO | 语义 |
+| 按键 | 接入 | 当前语义 |
 |---|---|---|
-| **BOOT** | GPIO9（上拉输入，下降沿） | `esp_restart()` 重启 |
-| **PWR** | 非 GPIO → AXP2101 PEK | 长按关机 / 单击开机 |
-| **KEY** | GPIO10（上拉输入，下降沿） | 预留录音 |
+| BOOT | GPIO9，上拉、按下拉低 | Focus 重置；Mac 上一曲/音量减，长按切页；Voice 准备/确认安全重放 |
+| KEY | GPIO10，上拉、按下拉低 | Focus 重新开始/长按选预设；Mac 下一曲/音量加，长按切模式；Voice 按住说话 |
+| PWR | AXP2101 PEK，非普通按键 GPIO | 短按按页面路由；Voice 请求取消并返回 Focus；全局长按 4 秒由 PMIC 断电，约 1 秒后显示 3 秒圆环提示；松手倒放并渐隐 |
 
-> ⚠️ **待确认**：原始设计里提到"屏 3 按住麦克风图标录音、800ms 内再按取消、POWER 长按 5 秒全局关机"，
-> 与现有 `KEY` GPIO10 的实现不完全对应 —— **KEY 按键当前是"预留"，实际录音走触摸图标**。
+运行时 BOOT 不是重启键，KEY 不是预留键。完整映射与时间参数见 [引脚与按键](../firmware/desk-mate-app/pinout.md)。
+
+蓝牙连接管理见 [蓝牙管理用法](../docs/BLUETOOTH.md)。BLE 语音与媒体共用当前选定对端，Wi-Fi 语音目标单独记忆。
 
 ### 2.3 屏幕分区（LVGL pager）
 
 | 屏 | 内容 | 交互 |
 |---|---|---|
-| 1 | **Focus 番茄钟** | 触摸开始/暂停/重置（**倒计时** 25 分钟工作 + 5 分钟休息）|
-| 2 | **Media 媒体** | BLE HID → macOS 媒体键（播放/暂停/上下曲/音量）|
-| 3 | **Voice 语音** | 触摸按住麦克风图标 → 录音；松开发送 |
+| 1 | **Focus 番茄钟** | 倒计时、触摸滚轮、开始/暂停/重置、5/15/25 分钟预设|
+| 2 | **Media 媒体** | BLE HID 媒体/音量键；最多 8 台已配对主机、同一时刻只连接和控制 1 台；每页 2 台设备 |
+| 3 | **Voice 语音** | 物理 KEY 按住录音；松开后留取消窗口，再提交执行 |
 
 ---
 
@@ -72,9 +68,12 @@
 
 ### 3.1 传输
 
+2026-11-02 正式加入 BLE 原始 PCM 语音，默认通过与 HID 共用的单连接传输；Wi-Fi/WSS 可手动选择。两条链路复用同一套会话、取消、封存、提交和执行契约；BLE 额外以 USB 凭据派生密钥做双向挑战证明并绑定蓝牙对端身份。详见 [BLE 语音桥接](../docs/BLE_VOICE.md)。原始吞吐依据见 [实验记录](../docs/BLE_VOICE_LAB.md)。
+
 - **WSS（TLS WebSocket）**，默认端口 **8765**
 - 双向 JSON 消息，**客户端（设备）→ 服务端（主机）** 与 **服务端→客户端** 各自一组类型
 - 证书校验强制；设备 token 通过 **USB 预配**（`provisioning.py`）
+- 服务发现方向：Mac 发布 `_voice-assistant._tcp.local.`，ESP32 查询；mDNS 只提供地址线索，TLS 验证身份
 
 ### 3.2 设备 → 主机
 
@@ -130,8 +129,8 @@ STAGING → SEALED → COMMITTED → TRANSCRIBING → PLANNING
 ## 4. 语音管线
 
 ```
-按键/触摸按住 → I2S 采集 (16 kHz mono s16) → 有界 PCM 环形缓冲
-   → 二进制 WS 帧 (WSS) → SenseVoice STT → 规则 planner → [回退] 本地 LLM
+物理 KEY 按住 → I2S 采集 (16 kHz mono s16) → 有界 PCM 环形缓冲
+   → BLE 分片或二进制 WS 帧 (WSS) → 共享会话 → SenseVoice STT → 规则 planner → [可选] 本地意图个性化 → [回退] 本地 LLM
    → ValidatedPlan → macOS Accessibility (ax_helper) → Bilibili
    → 结果回传设备；GOOD/BAD 覆盖层喂给个性化闭环
 ```
@@ -147,10 +146,7 @@ STAGING → SEALED → COMMITTED → TRANSCRIBING → PLANNING
 
 ### 4.2 决策层（★ 核心）
 
-**关键事实（与早期记忆不同，以代码为准）**：
-
-> `README.md` 明确：**规则 planner 是主路径，本地 LLM 是 fallback**。
-> `intent.py` 里有 `rule_based_proposal()`、`apply_policy_guard()`、`has_supported_intent()`。
+`pipeline.py` 定义执行顺序：支持意图预检查 → 确定性规则 → 可选本地个性化 → Ollama 回退 → 策略护栏 → 计划校验。规则优先是当前明确实现，不再列为尚未决定的问题。
 
 | 项 | 值 |
 |---|---|
@@ -183,7 +179,9 @@ STAGING → SEALED → COMMITTED → TRANSCRIBING → PLANNING
 
 `model_confidence` 可空 —— **不强迫模型每次都给置信度**，但给了就必须合法（0-1）。
 
-### 4.4 动作清单（18 个，⚠️ 早期记忆说 19 个，实际 18）
+### 4.4 动作契约（18 个：R1 5 个 + R2 13 个）
+
+默认启用集合由 `api.AppState.enabled_actions = contracts.R1_ACTIONS` 定义：`open/search/play/pause/resume`。下表记录全部契约，不代表全部已启用或已实现。
 
 | 动作 | 参数 | 说明 |
 |---|---|---|
@@ -206,9 +204,7 @@ STAGING → SEALED → COMMITTED → TRANSCRIBING → PLANNING
 | `system.mute` | — | 静音 |
 | `system.screenshot` | — | 截图 |
 
-> ⚠️ `bilibili.next` / `bilibili.prev` / `bilibili.history` / `bilibili.danmaku_on/off` 在 `ACTION_PARAM_TYPES` 里注册了，
-> 但 `adapters/bilibili.py` 的 `probe()` 只探测 `open/search/play/pause/resume` —— **能力探测覆盖不全**，
-> 意味着这几个动作在 `probe()` 返回的 `capabilities.available` 里可能缺失，**这是一个潜在缺口**。
+> R2 包含另外 13 个动作，默认禁用。真实 B 站适配器的能力探测和执行分支主要覆盖 R1；扩展时需要同步实现意图支持、能力探测、prepare/invoke/verify 和实机验收。不能仅扩白名单或补 probe 就宣布可用。
 
 ### 4.5 跨步骤引用（★ 关键机制）
 
@@ -259,6 +255,7 @@ player_generation / view_generation ← 播放器/视图快照代数
 
 - `ConfirmPreview` / `ConfirmRequired` 消息
 - `Confirm` 客户端响应
+- 主机协议与规划器已有相关结构；启用 R2 前仍需核验设备 UI、按键与消息处理是否形成真实确认闭环，不将协议存在等同于实机交付
 - 超时 → `CONFIRM_EXPIRED`
 - `planner._preview_for()` / `pipeline._account_for()` 生成预览
 
@@ -294,20 +291,22 @@ player_generation / view_generation ← 播放器/视图快照代数
 
 ---
 
-## 6. 学习闭环（完全本地）
+## 6. 反馈与本地个性化
 
-```
-设备 GOOD/BAD 覆盖层 → feedback 表
-   → feedback_analysis.py（分析）
-   → auto_training.py（自动触发训练）
-   → training.py（训练）
-   → personalization.py（个性化参数）
-   → preferences 表
-   → 下次决策生效（model_versions 记录指纹）
-```
+设备 GOOD/BAD 覆盖层将反馈写入 SQLite。当前实现包含以下四个模块：
 
-配套：`scripts/train-personalization.sh`、`install-training-reminder-agent.sh`（定时提醒 Agent 训练）
-`auto_training.py` 里 `training_reminder_loop()` 在 `api.py` 的 lifespan 中运行。
+| 模块 | 实际职责 | 触发方式 |
+|---|---|---|
+| `training.py` | 样本量统计、训练提醒、数据导出 | 服务每 6 小时调用提醒循环；另有 CLI |
+| `personalization.py` | 字符 n-gram + 逻辑回归分类器，只预测打开/暂停/继续 | CLI `train-personalization`；在线服务仅加载与推理 |
+| `auto_training.py` | 从显式 GOOD/BAD 反馈构建样本并验证，新模型验证准确率提高时替换 | CLI `auto-train-feedback`；当前 API 生命周期未自动调用训练 |
+| `feedback_analysis.py` | 批量反馈分析，给出供人工审阅的建议 | CLI `analyze-feedback`；默认批次 50，最少显式标签 10 |
+
+这不是 SenseVoice 或 LLM 的后训练/LoRA 微调，不能描述为在线自动训练。`auto_training.readiness()` 当前按至少 10 条可用样本和至少两个类别判断；代码注释中的“50 组”不是该函数实际执行的门槛。
+
+在线识别和控制默认本地运行，原始 PCM 不上传云服务。反馈批量分析可使用显式配置的外部 API，届时会发送转写文本、计划和部分上下文；“完全本地”不能无条件覆盖这一可选入口。
+
+待复核的个性化数据质量包括：BAD 反馈与正确标签的对应关系、重复语句的训练/验证隔离和模型回滚。跟踪任务见 [迭代待办](../docs/STATUS.md#后续待办)。
 
 ---
 
@@ -361,7 +360,7 @@ player_generation / view_generation ← 播放器/视图快照代数
 | 工具 | 版本 | 用途 |
 |---|---|---|
 | macOS | 13+ | 主机服务、辅助功能 |
-| **Python** | **3.11（不是 3.12+）** | `torch==2.14` / `funasr==1.4` 无 3.12+ wheel |
+| **Python** | **3.11（当前验证环境）** | 对齐依赖锁与原主机环境；其它版本未在本仓库验证，不推断 wheel 可用性 |
 | arduino-cli | 1.0+ | 固件 |
 | ESP32 core | 3.3.x (`esp32:esp32`) | 固件 |
 | Xcode CLT | 较新 | `swiftc` 编译 `ax_helper` |
@@ -373,26 +372,26 @@ player_generation / view_generation ← 播放器/视图快照代数
 
 ```
 mac/src/voice_assistant/
-├── contracts.py       (1112) 类型契约：Envelope、状态机、错误码、决策 schema
-├── storage.py          (742) SQLite 持久层 + 迁移
-├── config.py           (356) 配置、身份生成、权限
-├── cli.py              (355) 命令行
-├── pipeline.py         (384) 编排：COMMITTED → STT → 计划 → 执行
-├── sessions.py         (409) 会话与状态机驱动
-├── stt.py              (332) SenseVoice 接入
-├── executor.py         (306) 执行器
-├── intent.py           (272) 规则 planner + 策略护栏
-├── planner.py          (243) 计划校验与目标绑定 ★ 唯一可信入口
-├── decision.py         (211) Ollama 决策适配器（输出不可信）
-├── provisioning.py     (190) 设备 token 预配
-├── feedback_analysis.py(162) 反馈分析
-├── personalization.py  (148) 个性化
-├── training.py         (143) 训练
-├── auto_training.py    (135) 自动训练触发
+├── contracts.py        类型契约：Envelope、状态机、错误码、决策 schema
+├── storage.py           SQLite 持久层 + 迁移
+├── config.py            配置、身份生成、权限
+├── cli.py               命令行
+├── pipeline.py          编排：COMMITTED → STT → 计划 → 执行
+├── sessions.py          会话与状态机驱动
+├── stt.py               SenseVoice 接入
+├── executor.py          执行器
+├── intent.py            规则 planner + 策略护栏
+├── planner.py           计划校验与目标绑定 ★ 唯一可信入口
+├── decision.py          Ollama 决策适配器（输出不可信）
+├── provisioning.py      设备 token 预配
+├── feedback_analysis.py 反馈分析
+├── personalization.py   个性化
+├── training.py          训练
+├── auto_training.py     自动训练触发
 ├── api.py                     FastAPI + WS
-├── stt_worker.py        (81)  STT 子进程
-├── discovery.py         (62) 设备发现
-├── ax_daemon.py        (104) 辅助功能守护
+├── stt_worker.py          STT 子进程
+├── discovery.py          设备发现
+├── ax_daemon.py         辅助功能守护
 ├── adapters/
 │   ├── base.py
 │   ├── bilibili.py      B站适配（含 ax_helper 调用）
@@ -401,39 +400,51 @@ mac/src/voice_assistant/
 ├── migrations/
 │   ├── 001_initial.sql
 │   └── 002_feedback.sql
-└── prompts/intent-v1.txt  决策 prompt（33 行）
 
-tests/
+mac/prompts/intent-v1.txt  决策 prompt
+
+mac/tests/
 ├── unit/{test_contracts,test_feedback,test_intent,test_planner_executor,test_storage}.py
 └── integration/{test_protocol,test_tls}.py
 
 firmware/desk-mate-app/
-├── TODO.md / button_plan.md / pinout.md
-└── focus_ui.h / focus_model.h
+├── pinout.md               当前引脚与按键
+├── desk-mate-app.ino        入口与页面输入路由
+├── focus_ui.h / focus_model.h
+├── ble_ui.h / src/media_ble/ 蓝牙管理面板与连接策略
+└── src/bili_voice/          录音、状态机、传输与配网
 ```
 
 ---
 
-## 12. 已知缺口与待办
+## 12. 当前实现边界
 
-| # | 项 | 状态 |
-|---|---|---|
-| 1 | **硬件型号冲突**（2.16 vs 1.43）| ⚠️ 需确认实机 |
-| 2 | **KEY 按键**（GPIO10）语义未定 | ⚠️ 录音走触摸，KEY 预留 |
-| 3 | `probe()` 未覆盖全部动作 | ⚠️ 潜在能力缺口 |
-| 4 | 原始 spec 的"19 个动作" | ⚠️ 实际 18 个 |
-| 5 | `MASTER_SPEC.md` 原稿 | ❌ 已丢失（本文件为重建版）|
-| 6 | `bilibili.send_danmaku` 置信度门槛 | ⚠️ 早期记忆提到"三层防护"，代码中**未见置信度门槛实现** —— 需确认是设计意图还是待实现 |
-| 7 | 弹幕 30 字净化 + 30 秒限流 | ⚠️ 30 字有校验；30 秒限流**未在代码中见到** |
-
----
-
-## 13. 供 review 的三个开放问题
-
-1. **规则优先 vs LLM 优先** —— README 说规则主、LLM 备，但 `decision.py` 的实现量更大。是刻意的"先规则兜底再上 LLM"，还是应该反过来？
-2. **置信度门槛** —— `model_confidence` 字段存在但未见消费方。是否应该设阈值（低于 X 就走 `clarify_needed`）？这直接关系到"该不该硬猜"。
-3. **18 个动作的取舍** —— `bilibili.next/prev/history/danmaku_on/off` 注册了但能力探测没覆盖。要么补探测，要么从白名单移除 —— 保留"声明了但用不了"的动作是负债。
+| 范围 | 已核对事实 |
+|---|---|
+| 硬件与按键 | 2.16 寸 480×480 三按键基线；KEY 物理录音已实现，旧“KEY 预留”说明作废 |
+| R1 状态 | 用户确认已打通；历史运行台账五类动作有成功记录；不能因服务暂时停止改回未完成 |
+| R2 状态 | 默认禁用，真实 B 站执行层主要覆盖 R1；须逐动作贯通后开放 |
+| 模型置信度 | `DecisionProposal.model_confidence` 校验范围但未作为执行授权依据；本地意图分类器另有 0.55 推理阈值，两者不同 |
+| 账号/公开操作 | 主机有确认结构；R2 开放前核验设备确认、目标绑定、限流和真实执行，不能以模型自报置信度替代确认 |
+| 发弹幕限制 | 契约校验 30 字符/240 字节；不将早期讨论的 30 秒限流或置信度阈值当成已交付行为 |
+| 个性化 | 在线提醒与推理、CLI 训练/分析；未实现 ASR/LLM 自动微调 |
+| 诊断命令 | doctor 的 screen_capture 当前为固定值；退出码要求 Ollama 健康且端口空闲，需按字段判断是否阻断当前动作 |
 
 ---
 
-*重建于 2026-10-25 · 依据：`bili-esp32-ctrl` commit `c7c7760` 工作区状态*
+## 13. 后续扩展与验收原则
+
+进展、证据和待办只在 [docs/STATUS.md](../docs/STATUS.md) 维护；本规格不再保留另一份冲突任务清单。
+
+- 新动作须贯通输入、意图、契约校验、能力探测、真实执行与结果验证；协议注册或测试替身通过不是实机交付。
+- 启用账号/公开操作前核验确认闭环与目标新鲜度，外部结果不明时不得盲目重复执行。
+- 固件变更在同一镜像中回归计时器、BLE、第三页输入隔离、取消/重放与离线恢复。
+- 记录版本、环境、真实输入与验证结果。历史完成状态和当次运行状态分别维护。
+
+---
+
+*重建于 2026-10-25；2026-11-01 按合并基线、源码与历史运行记录修订。*
+
+### 2026-11-02 第 3 屏扩展
+
+语音电脑按稳定 server_id 保存最多 5 份独立授权，Wi-Fi 配置整体单独保存。旧单主机 NVS 迁移为第一条；USB 配对追加或更新记录，不覆盖其他电脑或已有 Wi-Fi。仅一台语音目标；新目标语音就绪后提交切换，失败恢复原目标，待结算命令/反馈绑定原服务器。BLE 模式下，第 3 屏连接操作通过认证绑定关联到第 2 屏同一蓝牙目标；Wi-Fi 模式保留独立语音目标。英文 UI 保留实时 RMS 音波、530ms 资格和最早 840ms 提交，以及原顶部分页点和全局 PWR。真实多机/语音验收由用户执行，本轮不运行端到端测试。用法见 [语音电脑管理](../docs/VOICE_COMPUTERS.md)。

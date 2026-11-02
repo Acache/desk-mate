@@ -8,6 +8,7 @@
 #include "focus_ui.h"
 #include "./src/bili_voice/voice_controller.h"
 #include "./src/bili_voice/provisioning.h"
+#include "./src/bili_voice/voice_hosts.h"
 
 struct ButtonState;
 
@@ -35,7 +36,7 @@ static void read_bili_status(FocusBiliStatus *out) {
 
 static void send_feedback_bridge(const char *command_id, const char *rating,
                                  const char *dismissed_by, int touch_count, int countdown_ms) {
-  vc_controller_feedback(command_id, rating, dismissed_by, touch_count, countdown_ms);
+  vc_controller_feedback(command_id, rating, dismissed_by, touch_count, countdown_ms, focus_feedback_origin);
 }
 
 void setup() {
@@ -57,10 +58,15 @@ void setup() {
   if (bsp_lvgl_lock(0)) {
     focus_ui_build(lv_scr_act(), media_send, PMU_GetBatteryPercent);
     focus_ui_set_bili_source(read_bili_status);
+    vh_read=vc_host_read;vh_submit=vc_host_submit;vh_gate=vc_controller_management;
     focus_ui_set_feedback_sink(send_feedback_bridge);
     bsp_lvgl_unlock();
   }
   media_begin();
+  if (bsp_lvgl_lock(0)) {
+    bt_bind(lv_scr_act(), focus_pager, ble_manager_read, ble_manager_submit);
+    bsp_lvgl_unlock();
+  }
   vc_controller_set_page(0);
   Serial.printf("READY heap=%u\n", ESP.getFreeHeap());
 }
@@ -71,6 +77,8 @@ struct ButtonState {
   uint32_t changed_at = 0, pressed_at = 0, repeat_at = 0;
   int active_short = 0, active_hold = 0;
   int owner_page = 0;
+  uint32_t owner_layer = 0;
+  bool manager_key = false, voice_manager = false;
   bool suppressed = false;
   bool timer_key = false;
 };
@@ -78,6 +86,7 @@ static ButtonState boot_button{9}, key_button{10};
 
 static void poll_button(ButtonState &b, int short_action, int hold_action) {
   uint32_t now = millis();
+  if (power_hold_visible(&power_hold)) b.suppressed = true;
   bool down = digitalRead(b.pin) == LOW;
   if (down != b.raw) { b.raw = down; b.changed_at = now; }
   if (b.raw != b.stable && now - b.changed_at >= 30) {
@@ -85,15 +94,19 @@ static void poll_button(ButtonState &b, int short_action, int hold_action) {
     if (b.stable) {
       b.pressed_at = now; b.repeat_at = now + 1400; b.held = false;
       b.owner_page = focus_page;
-      b.suppressed = (focus_page == PAGE_BILI);
+      b.owner_layer = (bt_input_generation()+vh_generation);
+      b.manager_key = bt_is_open();b.voice_manager=vh_is_open();
+      b.suppressed = (focus_page == PAGE_BILI && !b.voice_manager) || power_hold_visible(&power_hold);
       b.timer_key = focus_page == PAGE_FOCUS && b.pin == 10;
       b.active_short = b.suppressed ? -100 : (focus_page == PAGE_FOCUS ? (b.pin == 9 ? 7 : 8) : short_action);
       b.active_hold = b.suppressed ? -100 : (focus_page == PAGE_FOCUS ? (b.pin == 9 ? 7 : 9) : hold_action);
-    } else if (b.suppressed || b.owner_page != focus_page) {
+    } else if (b.suppressed || power_hold_visible(&power_hold) || b.owner_page != focus_page || b.owner_layer != (bt_input_generation()+vh_generation)) {
       Serial.printf("BUTTON %u release suppressed (owner=%d page=%d)\n", b.pin, b.owner_page, focus_page);
     } else if (!b.held) {
       Serial.printf("BUTTON %u tap action=%d\n", b.pin, b.active_short);
-      focus_action(b.active_short);
+      if(b.voice_manager)vh_key(b.pin,false);
+      else if (b.manager_key) bt_key(b.pin, false);
+      else focus_action(b.active_short);
     } else if (b.timer_key) {
       Serial.println("BUTTON KEY preset commit");
       focus_action(11);
@@ -106,11 +119,13 @@ static void poll_button(ButtonState &b, int short_action, int hold_action) {
   }
   if (b.stable && !b.held && now - b.pressed_at >= 700) {
     b.held = true;
-    if (!b.suppressed && b.owner_page == focus_page) {
+    if (!b.suppressed && !power_hold_visible(&power_hold) && b.owner_page == focus_page && b.owner_layer == (bt_input_generation()+vh_generation)) {
       Serial.printf("BUTTON %u hold action=%d\n", b.pin, b.active_hold);
-      focus_action(b.active_hold);
+      if(b.voice_manager)vh_key(b.pin,true);
+      else if (b.manager_key) bt_key(b.pin, true);
+      else focus_action(b.active_hold);
     }
-  } else if (b.stable && b.held && b.timer_key && !b.suppressed &&
+  } else if (b.stable && b.held && b.timer_key && !b.suppressed && !power_hold_visible(&power_hold) &&
              b.owner_page == focus_page && (int32_t)(now - b.repeat_at) >= 0) {
     b.repeat_at = now + 700;
     focus_action(10);
@@ -120,16 +135,19 @@ static void poll_button(ButtonState &b, int short_action, int hold_action) {
 void loop() {
   static uint32_t last_pmu = 0, last_status = 0;
   vc_controller_set_page(focus_page);
+  media_poll();
   if (bsp_lvgl_lock(50)) {
-    media_poll();
     focus_set_connected(media_ready());
     poll_button(boot_button, -1, 4);
     poll_button(key_button, 1, 5);
-    if (millis() - last_pmu >= 80) {
+    if (millis() - last_pmu >= 20) {
       last_pmu = millis();
-      if (PMU_TakeShortPress()) {
+      if (power_ui_input(PMU_PollButton())) {
         Serial.println("BUTTON PWR tap");
-        if (focus_page == PAGE_BILI) {
+        if(vh_is_open()){vh_key(0,false);
+        } else if (bt_is_open()) {
+          bt_key(0, false);
+        } else if (focus_page == PAGE_BILI) {
           vc_controller_pmic_short();
           focus_go_page(PAGE_FOCUS, true);
         } else {
@@ -139,6 +157,11 @@ void loop() {
     }
     if (millis() - last_status >= 10000) {
       last_status = millis();
+      BleSnapshot bv; ble_manager_read(&bv);
+      lv_mem_monitor_t lm; lv_mem_monitor(&lm);
+      Serial.printf("BTM state=%d hosts=%u target=%d current=%d enabled=%d auto=%d lv_used=%u lv_free_big=%u min_heap=%u\n",
+          (int)bv.state,bv.count,bv.selected,bv.current,bv.enabled,bv.auto_reconnect,
+          (unsigned)(lm.total_size-lm.free_size),(unsigned)lm.free_biggest_size,ESP.getMinFreeHeap());
       VoiceUiStatus vu;
       vc_controller_read(&vu);
       Serial.printf("STATUS page=%d scroll=%ld timer=%lu running=%d ble=%d heap=%u voice=%d result=%d net=%s\n",

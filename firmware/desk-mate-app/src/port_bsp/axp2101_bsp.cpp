@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <freertos/FreeRTOS.h>
 #include "axp2101_bsp.h"
+#include "../../power_hold.h"
 #define XPOWERS_CHIP_AXP2101
 #include "XPowersLib.h"
 
@@ -96,15 +97,29 @@ void Axp2101_SetAldo3(uint8_t vol) {
 }
 
 void PMU_EnableButton(void) {
+  bool off_time_ok = axp2101.setPowerKeyPressOffTime(XPOWERS_POWEROFF_4S);
+  axp2101.setLongPressPowerOFF();
+  axp2101.enableLongPressShutdown();
+  if (!off_time_ok || axp2101.getPowerKeyPressOffTime() != XPOWERS_POWEROFF_4S)
+    ESP_LOGE("PWR", "Failed to configure 4s hardware shutdown");
   axp2101.clearIrqStatus();
-  axp2101.enableIRQ(XPOWERS_AXP2101_PKEY_SHORT_IRQ);
+  axp2101.enableIRQ(XPOWERS_AXP2101_PKEY_SHORT_IRQ |
+      XPOWERS_AXP2101_PKEY_NEGATIVE_IRQ | XPOWERS_AXP2101_PKEY_POSITIVE_IRQ);
 }
 
-bool PMU_TakeShortPress(void) {
-  axp2101.getIrqStatus();
-  bool pressed = axp2101.isPekeyShortPressIrq();
-  axp2101.clearIrqStatus();
-  return pressed;
+uint8_t PMU_PollButton(void) {
+  // Read INTSTS2 directly: XPowers getIrqStatus converts failed reads to 0xFF.
+  // Acknowledge only observed PKEY bits, never erase a new edge with clear-all.
+  uint8_t status = 0;
+  if (AXP2101_SLAVE_Read(i2cPMICAddress, XPOWERS_AXP2101_INTSTS2, &status, 1) != 0)
+    return 0;
+  uint8_t observed = status & 0x0B; // short, negative (down), positive (up)
+  if (!observed) return 0;
+  if (AXP2101_SLAVE_Write(i2cPMICAddress, XPOWERS_AXP2101_INTSTS2, &observed, 1) != 0)
+    return 0;
+  return ((observed & 0x02) ? POWER_KEY_DOWN : 0) |
+         ((observed & 0x01) ? POWER_KEY_UP : 0) |
+         ((observed & 0x08) ? POWER_KEY_SHORT : 0);
 }
 
 void Axp2101_SetAldo2(uint8_t vol) {

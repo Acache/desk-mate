@@ -120,7 +120,7 @@
     * The circumference of 1/4 circle are saved for anti-aliasing
     * radius * 4 bytes are used per circle (the most often used radiuses are saved)
     * 0: to disable caching */
-    #define LV_CIRCLE_CACHE_SIZE 4
+    #define LV_CIRCLE_CACHE_SIZE 2 /* Bound circular mask caches on the 32KiB pool. */
 #endif /*LV_DRAW_COMPLEX*/
 
 /**
@@ -573,7 +573,7 @@
  *----------*/
 
 /*A simple, impressive and very complete theme*/
-#define LV_USE_THEME_DEFAULT 1
+#define LV_USE_THEME_DEFAULT 0 /* Shared UI provides styles; avoid unused default-theme RAM. */
 #if LV_USE_THEME_DEFAULT
 
     /*0: Light mode; 1: Dark mode*/

@@ -7,10 +7,18 @@ touchscreen sits on your desk and acts as a **hardware entry point** for control
 computer: start a focus timer, drive media playback over Bluetooth HID, or hold a button and
 *speak* a command that the host executes against real applications.
 
-The first shipped capability is voice control of **Bilibili** on macOS. The architecture is
+The first shipped voice-control capability is **Bilibili** on macOS. The architecture is
 deliberately application-agnostic so it can grow into a general desktop-control entry point.
 
 ---
+
+## Current status
+
+As of 2026-11-01, the Bilibili R1 end-to-end chain has already been exercised successfully.
+Development now focuses on iteration and feature expansion. The default voice action set is
+**open, search, play, pause, resume**; the other 13 declared actions are staged R2 work.
+See [progress, evidence and backlog](docs/STATUS.md) and the [documentation index](docs/README.md).
+A host service being stopped at a later check does not undo that delivery status.
 
 ## Why
 
@@ -21,8 +29,9 @@ is variable (search, open, navigate).
 
 Design constraints that shaped the implementation:
 
-- **Local-first audio.** Raw PCM never leaves your LAN. The host service performs STT and
-  intent resolution on-device, and only the resulting action crosses into the OS.
+- **Local-first audio.** Raw PCM stays on the direct BLE link or local LAN. The host service performs STT and
+  intent resolution locally. Optional batch feedback analysis can send text/context to an
+  explicitly configured API; it does not upload raw PCM.
 - **Deterministic over generative.** A rule planner handles the common commands; a small local
   model is a *fallback* and is policy-constrained — it cannot invent a search it was not asked for.
 - **Never break what already works.** The control surface must keep functioning when the host
@@ -35,14 +44,19 @@ Design constraints that shaped the implementation:
 | Screen | Capability | Transport |
 |---|---|---|
 | 1 — Focus | Countdown timer, touch wheels, presets, gestures, pause/resume | On-device |
-| 2 — Media | Mac media & volume: play/pause, next, previous, volume, mute | BLE HID (NimBLE) |
-| 3 — Voice | Push-to-talk Bilibili control with cancel, plus a feedback overlay | TLS WebSocket → local host service |
+| 2 — Media | Media/volume keys, 8 saved hosts, pairing and connection manager | BLE HID (NimBLE) |
+| 3 — Voice | Push-to-talk Bilibili control with cancel, plus a feedback overlay | BLE (shared with media) or TLS WebSocket → local host service |
+
+Bluetooth pairing, switching, rename/forget and reconnect settings: [Bluetooth guide](docs/BLUETOOTH.md).
+
+Production voice defaults to the same BLE connection as media; Wi-Fi/WSS remains selectable.
+See [BLE voice setup](docs/BLE_VOICE.md) and the earlier [synthetic throughput laboratory](docs/BLE_VOICE_LAB.md).
 
 **Screen 3 voice pipeline**
 
 1. Physical button hold → I2S capture (16 kHz mono, ES7210 dual mic).
-2. Bounded PCM ring buffer → binary WebSocket frames over TLS.
-3. Host: SenseVoice STT → rule planner → optional local LLM fallback.
+2. Bounded PCM ring buffer → BLE fragments or binary WebSocket frames over TLS.
+3. Host: SenseVoice STT → rule planner → optional local intent personalizer → local LLM fallback.
 4. Validated action plan → macOS Accessibility (`ax_helper`) → Bilibili.
 5. Result echoed to the device; a GOOD/BAD overlay feeds a personalization loop.
 
@@ -63,13 +77,16 @@ flowchart LR
         UI --- SM
         RING --> WS
         SM --> WS
+        RING --> BV["BLE voice GATT"]
+        SM --> BV
         BLE["NimBLE HID"] -->|BLE| MAC2["macOS media keys"]
     end
 
     WS["TLS WebSocket client"] -->|WSS :8765| SVC
+    BV -->|shared HID link| BRIDGE["Mac BLE companion"] --> SVC
 
     subgraph Host["Host service (macOS)"]
-        SVC["WSS server<br/>auth · sessions · ledger"]
+        SVC["Shared session dispatcher<br/>auth · sessions · ledger"]
         SVC --> STT["SenseVoice STT"]
         STT --> PLAN["Rule planner"]
         PLAN -.fallback.-> LLM["Local LLM"]
@@ -106,7 +123,8 @@ hardware to work on the host service, and you do not need the host service to wo
 | Xcode CLT | any recent | `swiftc` for `ax_helper` |
 | Bilibili desktop app | latest | Voice control target |
 
-`python3.11` specifically: `torch==2.14` and `funasr==1.4` have no wheels for 3.12+ yet.
+Use Python 3.11 to match the existing host environment and dependency lock. Other Python
+versions have not been validated here; wheel availability is not established by this repository.
 
 ---
 
@@ -159,7 +177,7 @@ Iterate on layout, fonts, and the pager without flashing anything.
 ```bash
 cd tools/lv_sim
 cmake -S . -B build && cmake --build build -j
-./build/lv_sim
+./build/deskmate
 ```
 
 The simulator links **LVGL 9** (SDL2 window) and needs a checkout to point at:
@@ -169,9 +187,10 @@ cmake -S . -B build -DLVGL_DIR=/path/to/lvgl-9.x
 ```
 
 Add `-DLVGL8_DIR=/path/to/lvgl-8.4` to also build the v8 renderer used by the hardware. SDL2 comes
-from Homebrew (`brew install sdl2`). Files shipped as `*.c` under `firmware/desk-mate-app/` are
-compiled by Arduino's build, not by this CMake project — so the simulator mirrors UI layout rather
-than running the shipping sketch.
+from Homebrew (`brew install sdl2`). The simulator directly includes the shared `focus_ui.h`
+and links `focus_font_120.c`;
+it exercises the timer, pager and feedback UI with mocked hardware/voice status. It does not run
+the Arduino sketch, BLE radio, microphone or WSS transport. See [simulator instructions](tools/lv_sim/README.md).
 
 ---
 
@@ -198,6 +217,11 @@ arduino-cli upload \
   --port /dev/cu.usbmodem0001 --input-dir build/firmware
 ```
 
+Keep `build_opt.h` and `ble_build_config.h` with the sketch. They configure the entire
+source-built NimBLE library for **8 saved bonds and 1 simultaneous connection**.
+The configuration loads SDK defaults before overriding them; plain command-line `-D`
+flags alone are overridden by this ESP32 SDK. Compile-time checks reject mismatched builds.
+
 Every option in the FQBN matters:
 
 | Flag | Why |
@@ -216,8 +240,8 @@ plus PWR respond. Screens 1–2 work with no host service running at all.
 Everything from paths A and C, plus provisioning.
 
 ```bash
-# 1. start the host
-./run.sh
+# 1. start the host (BLE default; use the Desk-Mate CoreBluetooth UUID)
+./run.sh --ble-address '<Desk-Mate UUID>'
 
 # 2. find the board
 PYTHONPATH=mac/src .venv/bin/python -m voice_assistant.cli ports
@@ -227,7 +251,9 @@ PYTHONPATH=mac/src .venv/bin/python -m voice_assistant.cli pair \
   --port /dev/cu.usbmodem0001 --ssid '<your-2.4GHz-SSID>'
 ```
 
-Omit `--ssid`/`--password` to use the device's SoftAP provisioning mode instead of USB serial.
+Voice now defaults to BLE, sharing the selected media connection. Wi-Fi/WSS remains explicitly selectable. Install the optional BLE runtime and see [BLE voice setup](docs/BLE_VOICE.md).
+
+USB remains the authorization channel. With the new voice-computer manager, omit Wi-Fi credentials to preserve an existing network. Configure a new network from Voice → Wi-Fi / Network → Change Wi-Fi, then open the device hotspot page on your phone. See [Voice computer management](docs/VOICE_COMPUTERS.md).
 
 > The SoftAP fallback broadcasts SSID `Desk-Mate-Voice` with a **fixed default password**
 > (`deskmate`), compiled into the firmware. Treat it as a convenience for first-time setup only:
@@ -237,9 +263,9 @@ Omit `--ssid`/`--password` to use the device's SoftAP provisioning mode instead 
 Credentials go to device NVS only and are never echoed back. To keep the password out of your
 shell history, pass it via `--password "$(read -rs -p 'WiFi: ' p; echo $p)"`.
 
-The Wi-Fi must be **2.4 GHz** — the ESP32-C6 has no 5 GHz radio. If the Mac and the board land on
+When using Wi-Fi mode, the network must be **2.4 GHz** — the ESP32-C6 has no 5 GHz radio. If the Mac and the board land on
 different subnets (guest network, AP isolation), voice stays disconnected: both must reach each
-other on port 8765.
+other on port 8765. BLE mode does not require LAN reachability.
 
 Done when: `doctor` reports `accessibility: true`, screen 3 shows `net=READY`, and holding the
 button produces a transcribed command in `cli status`.
@@ -253,9 +279,11 @@ PYTHONPATH=mac/src .venv/bin/python -m pytest mac/tests -q   # host unit + integ
 PYTHONPATH=mac/src .venv/bin/python -m voice_assistant.cli doctor
 ```
 
-`doctor` checks macOS, Python, data root, port availability, Bilibili presence, `ax_helper` trust,
-Accessibility, Screen Recording, STT health, Ollama health, device count, and temp/disk space.
-Whatever comes back `false` and matters to you is your actionable blocker.
+`doctor` reports macOS, Python, data root, port availability, Bilibili presence, helper trust,
+STT/Ollama health, devices and disk space. Its current `screen_capture` value is a placeholder,
+not a real Screen Recording permission probe. Its exit code also requires Ollama health and a
+free port, so an optional LLM being absent or the service already using the port can produce a
+nonzero result. Interpret individual fields against the action you are testing.
 
 ### Troubleshooting quick hits
 
@@ -281,7 +309,13 @@ Whatever comes back `false` and matters to you is your actionable blocker.
 | Storage | 16 MB flash, no-OTA partition scheme |
 
 Pin map: [`firmware/desk-mate-app/pinout.md`](firmware/desk-mate-app/pinout.md)
-Buttons: BOOT = GPIO9 (restart), KEY = GPIO10 (spare), PWR = AXP2101 PEK — see `desk-mate-app.ino`.
+Buttons: BOOT = GPIO9, KEY = GPIO10, PWR = AXP2101 PEK. Actions are page-owned:
+on Voice, hold KEY to talk, press BOOT twice to prepare/confirm replay, and tap PWR to cancel/back.
+Globally, hold PWR for 4 seconds to power off. After the first second a floating ring
+counts 0s–3s; release to rewind (up to 2s), then fade (1s). Cancelled holds never
+trigger page taps. Cold power-on remains PMIC controlled (AXP2101 supports at most
+2s for its power-on threshold).
+See the [full button map](firmware/desk-mate-app/pinout.md).
 
 ---
 
@@ -291,7 +325,9 @@ Buttons: BOOT = GPIO9 (restart), KEY = GPIO10 (spare), PWR = AXP2101 PEK — see
 firmware/desk-mate-app/       Arduino sketch — the complete device application
   desk-mate-app.ino           Entry: pager, boot, main loop, owner bridge
   focus_ui.h / focus_model.h  Screen 1: timer UI and state machine
-  media_ble.h                 Screen 2: BLE HID media/volume
+  media_ble.h                 Screen 2: BLE lifecycle compatibility wrapper
+  ble_ui.h                    Bluetooth device management panel
+  src/media_ble/              BLE policy, bonding, persistence and per-host HID
   src/bili_voice/             Screen 3: capture, FSM, transport, provisioning
   src/port_bsp/               AXP2101 + I2C board support
   src/externLib/              SH8601 panel driver
@@ -310,31 +346,24 @@ Third-party Arduino libraries are **not vendored**. Install them as shown in Qui
 
 - **Single sketch, three pages.** New functionality was added as pages inside the existing
   pager rather than as a separate firmware, so switching features needs no reflash.
-- **Static-singleton boundary.** `focus_ui.h` and `media_ble.h` hold singleton state owned by
-  the `.ino` translation unit. New C++ modules communicate through an owner bridge and events
-  instead of including those headers, avoiding duplicated timers, UI, and BLE state.
+- **Single ownership.** `focus_ui.h` holds the sketch-owned UI/timer state. BLE state lives
+  in `src/media_ble/ble_manager.cpp`; callbacks post bounded events, and UI requests are queued
+  through fixed-size snapshots. Modules do not duplicate the UI or BLE singleton state.
 - **Page-owned input routing.** Voice-page input never falls through to legacy HID or timer
   actions; ownership is explicit and asserted.
 - **Bounded memory.** PCM ring of 64 frames, two 10-line draw buffers, 32 KiB LVGL pool —
   measured against real device heap rather than assumed.
 
-Known gaps and open questions: see `spec/MASTER_SPEC.md` §12–13.
+Current implementation boundaries: see `spec/MASTER_SPEC.md` §12–13.
+Completion evidence and iteration tasks are maintained in [docs/STATUS.md](docs/STATUS.md).
 
 ---
 
 ## Roadmap
 
-- [x] Focus timer with touch wheels and presets
-- [x] BLE HID media/volume control
-- [x] Push-to-talk Bilibili voice control over TLS WSS
-- [x] Feedback overlay + personalization data collection
-- [ ] Generalized app control (beyond Bilibili) via a pluggable adapter interface
-- [ ] Windows host service
-- [ ] Wake-word entry (hands-free)
-- [ ] Published prebuilt firmware images
-
-The long-term goal is a **portable desktop-control endpoint**: the same device, the same
-protocol, different host backends.
+R1 Bilibili voice control is complete. Upcoming work covers existing-flow improvements,
+incremental R2 actions, additional app adapters, and later Windows/wake-word/release support.
+See the single [iteration backlog](docs/STATUS.md#后续待办) for scope and acceptance criteria.
 
 ---
 
