@@ -684,9 +684,14 @@ class BilibiliAdapter(ActionAdapter):
             except Exception:
                 return None
 
+        # A dedicated search window (search.html) wins when it is open: that is
+        # the page the user is looking at after 搜索.
+        search = read("search.html")
+        if search and search.get("search_results"):
+            return search
         if front_is_main:
-            return read("index.html") or read("player.html")
-        return read("player.html") or read("index.html")
+            return search or read("index.html") or read("player.html")
+        return read("player.html") or search or read("index.html")
 
     def _duration_seconds(self) -> int | None:
         """Total video length from the public API (more reliable than OCR)."""

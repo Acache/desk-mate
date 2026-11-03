@@ -297,36 +297,49 @@ class CdpPlayer:
         return str(self.js("document.title || ''") or "")
 
     CONTEXT_JS = r"""(() => {
-      const links = (root) => [...root.querySelectorAll('a[href*="/video/BV"]')]
-        .map(a => {
+      const titleOf = (a) => (a.textContent || '').trim();
+      const collect = (root) => {
+        const seen = {};
+        [...root.querySelectorAll('a[href*="/video/BV"]')].forEach(a => {
           const m = (a.href || '').match(/BV[0-9A-Za-z]{10}/);
-          return m ? {bvid: m[0], title: (a.textContent || '').trim().slice(0, 60)} : null;
-        }).filter(Boolean);
+          if (!m) return;
+          const t = titleOf(a);
+          if (t.length < 2 || /^[0-9:：\s万.]+$/.test(t)) return;
+          if (!seen[m[0]] || t.length > seen[m[0]].title.length) {
+            seen[m[0]] = {bvid: m[0], title: t.slice(0, 80)};
+          }
+        });
+        return Object.values(seen);
+      };
       const out = {url: location.href, title: document.title, page: 'other',
                    search_results: [], episodes: [], recommendations: []};
       if (location.href.indexOf('search') >= 0) out.page = 'search';
       else if (location.href.indexOf('/page/home') >= 0) out.page = 'home';
       else if (location.href.indexOf('player.html') >= 0) out.page = 'player';
       if (out.page === 'search') {
-        let all = links(document);
-        // Recommendation carousels sit above the real list; start after the
-        // "找到 … 个视频 / 搜索结果" marker when it can be found.
+        let items = collect(document);
         const marker = [...document.querySelectorAll('*')].find(e =>
           e.children.length === 0 && /找到.*个视频|搜索结果/.test(e.textContent || ''));
         if (marker) {
-          const after = all.filter(a => {
-            const el = document.querySelector('a[href*="' + a.bvid + '"]');
+          const after = items.filter(it => {
+            const el = document.querySelector('a[href*="' + it.bvid + '"]');
             return el && (marker.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING);
           });
-          if (after.length) all = after;
+          if (after.length) items = after;
         }
-        out.search_results = all;
+        out.search_results = items;
       }
       if (out.page === 'player') {
-        const pods = [...document.querySelectorAll('[class*="anthology"], [class*="video-pod"], [class*="media_list"]')];
-        out.episodes = pods.length ? links(pods[0]) : [];
-        const rec = document.querySelector('[class*="recommend"], [class*="related"]');
-        out.recommendations = rec ? links(rec) : [];
+        const all = collect(document);
+        const episodes = [];
+        const pods = [...document.querySelectorAll('[class*="anthology"], [class*="video-pod"]')];
+        for (const pod of pods) {
+          const items = collect(pod);
+          if (items.length >= 2) { episodes.push(...items); break; }
+        }
+        const episodeIds = new Set(episodes.map(e => e.bvid));
+        out.episodes = episodes;
+        out.recommendations = all.filter(it => !episodeIds.has(it.bvid));
       }
       return JSON.stringify(out);
     })()"""
