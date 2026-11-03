@@ -1,4 +1,5 @@
 import AppKit
+import CoreBluetooth
 import ApplicationServices
 import CoreGraphics
 import ServiceManagement
@@ -241,7 +242,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         permissionsMenu.addItem(item("辅助功能…", #selector(openAccessibilityPane)))
         permissionsMenu.addItem(item("屏幕录制…", #selector(openScreenPane)))
         permissionsMenu.addItem(item("蓝牙…", #selector(openBluetoothPane)))
-        permissionsMenu.addItem(item("麦克风…", #selector(openMicrophonePane)))
         permissionsMenu.addItem(.separator())
         permissionsMenu.addItem(item("权限说明与检查…", #selector(permissions)))
         permissionsItem.submenu = permissionsMenu
@@ -369,6 +369,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.showResult(result,fallback:"B站本地控制操作未完成")
             }
         }
+    }
+
+    @objc func recheckPermissions() {
+        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+        _ = AXIsProcessTrustedWithOptions(options)
+        _ = CGRequestScreenCaptureAccess()
+        mainWindow?.update()
+        refresh()
     }
 
     @objc func openAccessibilityPane() { openPrivacyPane("Privacy_Accessibility") }
@@ -559,11 +567,23 @@ final class MainWindowController: NSObject, NSWindowDelegate {
         stack.addArrangedSubview(label("语音识别：\(stt["available"] as? Bool == true ? "已就绪" : "尚未就绪") · 决策模型：\(model["model_loaded"] as? Bool == true ? "已加载" : "尚未加载")"))
 
         stack.addArrangedSubview(label("权限", bold: true))
-        stack.addArrangedSubview(label("辅助功能：\(AXIsProcessTrusted() ? "已授权" : "未授权") · 屏幕录制：\(CGPreflightScreenCaptureAccess() ? "已授权" : "未授权")"))
+        let ax = AXIsProcessTrusted()
+        let screen = CGPreflightScreenCaptureAccess()
+        let bt: String
+        switch CBManager.authorization {
+        case .allowedAlways: bt = "已授权"
+        case .denied: bt = "已拒绝"
+        case .restricted: bt = "受限制"
+        default: bt = "未授权"
+        }
+        stack.addArrangedSubview(label("辅助功能：\(ax ? "已授权" : "未授权") · 屏幕录制：\(screen ? "已授权" : "未授权") · 蓝牙：\(bt)"))
+        stack.addArrangedSubview(label("当前运行的程序：\(Bundle.main.bundlePath)", size: 11, color: .secondaryLabelColor))
+        stack.addArrangedSubview(label("如在系统设置中已授权但仍显示未授权：请先退出本 App 再重新打开；系统按程序签名记录授权。",
+                                       size: 11, color: .secondaryLabelColor))
         stack.addArrangedSubview(row([button("辅助功能…", #selector(AppDelegate.openAccessibilityPane)),
                                       button("屏幕录制…", #selector(AppDelegate.openScreenPane)),
                                       button("蓝牙…", #selector(AppDelegate.openBluetoothPane)),
-                                      button("麦克风…", #selector(AppDelegate.openMicrophonePane))]))
+                                      button("重新检测", #selector(AppDelegate.recheckPermissions))]))
 
         stack.addArrangedSubview(label("诊断与数据", bold: true))
         stack.addArrangedSubview(row([button("导出诊断…", #selector(AppDelegate.exportDiagnostics)),
