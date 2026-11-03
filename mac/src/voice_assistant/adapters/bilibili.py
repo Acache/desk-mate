@@ -657,6 +657,37 @@ class BilibiliAdapter(ActionAdapter):
         except player_ui.PlayerUiError as exc:
             raise AdapterError(ErrorCode.ACTION_FAILED, exc.message or exc.code) from exc
 
+    def context_snapshot(self) -> dict[str, Any] | None:
+        """What is on screen right now (page type and visible video lists).
+
+        Prefers the floating player page; falls back to the main window for
+        search/home pages. Returns None when CDP is unavailable.
+        """
+        if not cdp_player.available():
+            return None
+        # Whichever window is in front is what the user is looking at.
+        front_is_main = False
+        try:
+            windows = self._helper("cgwindows", timeout=6).get("windows") or []
+            front = str((windows[0] or {}).get("name") or "") if windows else ""
+            front_is_main = "哔哩哔哩 (" in front
+        except Exception:
+            pass
+
+        def read(marker: str) -> dict | None:
+            ws = cdp_player.ws_for(marker)
+            if not ws:
+                return None
+            try:
+                with cdp_player.CdpPlayer(ws) as session:
+                    return session.read_context()
+            except Exception:
+                return None
+
+        if front_is_main:
+            return read("index.html") or read("player.html")
+        return read("player.html") or read("index.html")
+
     def _duration_seconds(self) -> int | None:
         """Total video length from the public API (more reliable than OCR)."""
         bvid = self._current_bvid()

@@ -155,6 +155,9 @@ class PipelineContext:
     # Transcripts started at Seal (audio complete) so STT overlaps the device's
     # cancel window instead of starting only after Commit.
     early_stt: dict[str, Any] | None = None
+    # Returns the visible page context (page type + result/episode lists) from
+    # the local CDP session; None when it is not available.
+    context_reader: Callable[[], Any] | None = None
 
 
 class Pipeline:
@@ -348,9 +351,37 @@ class Pipeline:
             await notify(Progress(msg_id=0, command_id=UUID(command_id), stage="planning", step_index=None))
             t_refresh0 = time.perf_counter()
             context = self._context(command_id)
+            proposal = None
+            route = "rules"
+            # Context first: resolve "第 N 个 / 打开 <标题>" against the page the
+            # user is actually looking at (search results, episodes, recommen-
+            # dations) instead of the previous command's snapshot.
+            if self.ctx.context_reader is not None:
+                try:
+                    page = await asyncio.to_thread(self.ctx.context_reader)
+                except Exception:
+                    page = None
+                if page:
+                    from .context_rules import PageContext, resolve as resolve_context
+
+                    decision = resolve_context(transcript.normalized_text, PageContext(
+                        page=str(page.get("page") or "other"),
+                        search_results=list(page.get("search_results") or []),
+                        episodes=list(page.get("episodes") or []),
+                        recommendations=list(page.get("recommendations") or []),
+                    ))
+                    if decision and decision.get("action") == "bilibili.play":
+                        proposal = contracts.DecisionProposal(
+                            status=contracts.DecisionStatus.ok,
+                            reason_code=contracts.ReasonCode.none,
+                            actions=[contracts.ActionStep(id=0, action="bilibili.play",
+                                                          params=dict(decision["params"]))],
+                        )
+                        route = "context"
             # Prefer the deterministic R1 grammar for clear commands. The LLM
             # must not add an unspoken search/play action to "打开B站".
-            proposal = rule_based_proposal(transcript.normalized_text, context)
+            if proposal is None:
+                proposal = rule_based_proposal(transcript.normalized_text, context)
             # Refresh the player snapshot by *action*, not by Chinese keywords:
             # "点个赞" never contains "点赞" and used to fail with TARGET_STALE.
             needs_player = proposal is None or any(

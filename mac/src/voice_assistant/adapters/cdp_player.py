@@ -196,6 +196,13 @@ def ensure(restart: bool = False, timeout: float = 12.0) -> bool:
     return available()
 
 
+def ws_for(marker: str) -> str | None:
+    for target in _targets():
+        if marker in (target.get("url") or ""):
+            return target.get("webSocketDebuggerUrl")
+    return None
+
+
 def player_ws() -> str | None:
     for target in _targets():
         if PLAYER_URL_MARK in (target.get("url") or ""):
@@ -288,6 +295,45 @@ class CdpPlayer:
 
     def title(self) -> str:
         return str(self.js("document.title || ''") or "")
+
+    CONTEXT_JS = r"""(() => {
+      const links = (root) => [...root.querySelectorAll('a[href*="/video/BV"]')]
+        .map(a => {
+          const m = (a.href || '').match(/BV[0-9A-Za-z]{10}/);
+          return m ? {bvid: m[0], title: (a.textContent || '').trim().slice(0, 60)} : null;
+        }).filter(Boolean);
+      const out = {url: location.href, title: document.title, page: 'other',
+                   search_results: [], episodes: [], recommendations: []};
+      if (location.href.indexOf('search') >= 0) out.page = 'search';
+      else if (location.href.indexOf('/page/home') >= 0) out.page = 'home';
+      else if (location.href.indexOf('player.html') >= 0) out.page = 'player';
+      if (out.page === 'search') {
+        let all = links(document);
+        // Recommendation carousels sit above the real list; start after the
+        // "找到 … 个视频 / 搜索结果" marker when it can be found.
+        const marker = [...document.querySelectorAll('*')].find(e =>
+          e.children.length === 0 && /找到.*个视频|搜索结果/.test(e.textContent || ''));
+        if (marker) {
+          const after = all.filter(a => {
+            const el = document.querySelector('a[href*="' + a.bvid + '"]');
+            return el && (marker.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING);
+          });
+          if (after.length) all = after;
+        }
+        out.search_results = all;
+      }
+      if (out.page === 'player') {
+        const pods = [...document.querySelectorAll('[class*="anthology"], [class*="video-pod"], [class*="media_list"]')];
+        out.episodes = pods.length ? links(pods[0]) : [];
+        const rec = document.querySelector('[class*="recommend"], [class*="related"]');
+        out.recommendations = rec ? links(rec) : [];
+      }
+      return JSON.stringify(out);
+    })()"""
+
+    def read_context(self) -> dict:
+        raw = self.js(self.CONTEXT_JS)
+        return json.loads(raw or "{}")
 
     # --- actions ---------------------------------------------------------
     def like(self) -> dict:

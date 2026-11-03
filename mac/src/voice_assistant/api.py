@@ -112,6 +112,8 @@ class AppState:
             billi = registry.adapter_for("bilibili.pause")
             if hasattr(billi, "refresh_player_snapshot"):
                 self.pipeline.ctx.refresh_player = billi.refresh_player_snapshot
+            if hasattr(billi, "context_snapshot"):
+                self.pipeline.ctx.context_reader = billi.context_snapshot
             self.bilibili_adapter = billi
         except Exception:
             self.bilibili_adapter = None
