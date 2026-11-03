@@ -13,7 +13,8 @@ from difflib import SequenceMatcher
 # not reach the LLM/executor as a vague play/open request.
 _KEYWORDS = ("打开", "搜索", "搜", "播放", "暂停", "继续", "恢复", "点击", "停",
              "点赞", "投币", "收藏", "弹幕", "评论", "快进", "后退", "回退", "倒退",
-             "音量", "声音", "下一集", "下集", "上一集", "上集", "币")
+             "音量", "声音", "下一集", "下集", "上一集", "上集", "币",
+             "小声", "大声", "接着播", "接着放", "往后", "往前", "收起来", "太吵", "跳到", "点个赞", "b站", "哔哩哔哩")
 _PUNCT = re.compile(r"[\s，。！？、,.!?;；:：\-—_（）()\[\]【】\"'“”‘’]+")
 
 
@@ -126,6 +127,23 @@ def clarify_proposal(summary: str) -> "DecisionProposal":
     return _clarify(summary)
 
 
+def negated_actions(text: str) -> set[str]:
+    """Recognize explicit negated clauses, without reading literal payloads."""
+    mapping = {"点赞":("bilibili.like",),"点个赞":("bilibili.like",),"投币":("bilibili.coin",),
+               "收藏":("bilibili.favorite",),"暂停":("bilibili.pause",),"评论":("bilibili.comments",),
+               "播放":("bilibili.play","bilibili.resume"),
+               "打开B站":("bilibili.open",),"打开b站":("bilibili.open",),"打开哔哩哔哩":("bilibili.open",)}
+    result = set()
+    for clause in re.split(r"[，,。；;]|但是|而是|不过|改成|只",text):
+        if re.match(r"^(?:请|帮我)?(?:搜索|搜|发送弹幕|发弹幕|发一条弹幕|收藏到)",clause.strip()):
+            continue
+        negative = re.search(r"不要|先别|别|没有让你|没让你|不想|不需要",clause)
+        if negative:
+            tail = clause[negative.end():]
+            result.update(action for word,actions in mapping.items() if word in tail for action in actions)
+    return result
+
+
 def apply_policy_guard(text: str, proposal: "DecisionProposal | None") -> "DecisionProposal | None":
     """Constrain model fallback so it cannot invent side effects.
 
@@ -135,6 +153,17 @@ def apply_policy_guard(text: str, proposal: "DecisionProposal | None") -> "Decis
     if proposal is None:
         return None
     t = normalize_intent_text(text)
+    literal = re.match(r"^(?:请|帮我)?(?:搜索|搜|发送弹幕|发弹幕|发一条弹幕|收藏到)", text.strip())
+    if not literal:
+        if unsupported_intent_reason(text) or re.search(r"取消(?:点赞|收藏)|发表评论",t):
+            return _out_of_scope("该动作当前不支持")
+    if not re.match(r"^(?:请|帮我)?(?:搜索|搜|发送弹幕|发弹幕|发一条弹幕)", text.strip()) and re.search(r"了吗|有没有|是不是|为什么",t):
+        return _clarify("请明确说要执行的动作；查询不会触发操作")
+    forbidden = negated_actions(text)
+    if forbidden.intersection(a.action for a in proposal.actions):
+        return _clarify("没有执行被否定的动作，请重新说明要做什么")
+    if forbidden and not re.search(r"[，,；;]|只|而是|但是",text):
+        return _out_of_scope("已取消，不会执行该动作")
     actions = [a.action for a in proposal.actions]
     if "bilibili.search" in actions and not any(k in t for k in ("搜索", "搜")):
         # A title direct-play rule intentionally searches the title first.
@@ -144,9 +173,22 @@ def apply_policy_guard(text: str, proposal: "DecisionProposal | None") -> "Decis
             pass
         else:
             return _clarify("这句话没有明确说搜索；请先明确说“搜索…”或用搜索结果说第几个")
-    if len(actions) > 1 and not any(k in t for k in ("然后", "并", "再", "搜索", "搜")):
+    if len(actions) > 1 and not any(k in t for k in ("然后", "并", "再", "搜索", "搜", "顺便", "同时", "也", "以及", "接着", "和")):
         return _clarify("这句话包含多个动作，请分开说，避免误操作")
     return proposal
+
+
+def is_semantic_request(text: str) -> bool:
+    """Keep compound, negative and interrogative input out of the classifier."""
+    return bool(re.search(r"然后|顺便|同时|并且|以及|再|接着|但是|不过|改成|而是|不要|别|不想|能不能|是否|为什么|怎么|了吗|[？?]", text))
+
+
+def personalization_candidate(text: str) -> bool:
+    # The trained classifier has only open/pause/resume labels, no slots.
+    # Do not let it absorb R2 or multi-target requests with a high score.
+    return (not is_semantic_request(text)
+            and not re.search(r"搜索|收藏|赞|币|弹幕|评论|秒|音量|声音|小声|大声|第",text)
+            and bool(re.search(r"暂停|停住|停下|继续|恢复|接着播|(?:打开|启动|开).*?(?:B站|b站|哔哩)",text)))
 
 
 def rule_based_proposal(text: str, context=None) -> "DecisionProposal | None":
@@ -163,38 +205,48 @@ def rule_based_proposal(text: str, context=None) -> "DecisionProposal | None":
     # Light filler/punctuation tolerance without changing stored transcripts.
     t = re.sub(r"^(?:请|麻烦|帮我|帮忙|给我|现在|那个|这个)+", "", t)
     t = re.sub(r"(?:一下|吧|啊|呀|呢|谢谢)$", "", t)
-    if ("不要" in t or "别" in t) and any(k in t for k in ("打开", "搜索", "播放", "暂停", "继续", "恢复")):
+    if re.fullmatch(r"只?(?:打开|启动)(?:b站|哔哩哔哩)(?:不要|别)(?:播放|搜索)",t):
+        return _ok([("bilibili.open", {}, [])])
+    if re.fullmatch(r"(?:不要|别|先别)(?:打开b站|搜索|播放|暂停|继续|恢复|点赞|投币|收藏)(?:这个视频|视频|了)?", t):
         return _out_of_scope("已取消，不会执行该动作")
 
+    # Preserve literal content; action words inside a payload are not commands.
+    literal = text.strip()
+    dm = re.fullmatch(r"(?:请|帮我)?(?:发送|发)(?:一条|个|条)?弹幕[\s：:,，]*(.+)", literal)
+    if dm:
+        payload = dm.group(1).strip()
+        if len(payload) > 30:
+            return _clarify("弹幕最多30个字，请缩短后重试")
+        return _ok([("bilibili.send_danmaku", {"text": payload}, [])])
+    search_only = re.fullmatch(r"(?:请|麻烦|帮我)?(?:搜索|搜)(.+)", literal)
+    canonical_search_play = re.fullmatch(r"(?:搜索|搜).+?(?:然后|并|再)?播放第[0-9一二三四五六七八九十]+个(?:视频)?", t)
+    if search_only and not re.search(r"然后|顺便|同时|并且|再(?:播放|点赞|收藏)|播放第", search_only.group(1)):
+        return _ok([("bilibili.search", {"query": search_only.group(1).strip()}, [])])
+    if is_semantic_request(text) and not canonical_search_play:
+        return None
+
+    folder_match = re.fullmatch(r"(?:请|帮我|麻烦|这个|那个)*收藏(?:到|至|进|在)(.+?)(?:收藏夹|文件夹|里|中)?[。]?$",literal)
+    if folder_match:
+        folder = folder_match.group(1).strip()
+        if len(folder) > 32:
+            return _clarify("文件夹名最多32个字，请缩短后重试")
+        return _ok([("bilibili.favorite", {"folder":folder}, [])])
+
     # --- R2 player controls (deterministic; execution is verified by UI read-back) ---
-    if "点赞" in t or "赞一下" in t or "点个赞" in t or t == "赞":
+    if re.fullmatch(r"(?:给(?:这个)?视频)?(?:点赞|赞一下|点个赞|赞)(?:这个视频|视频)?", t):
         return _ok([("bilibili.like", {}, [])])
-    if "投币" in t or "投个币" in t or ("投" in t and "币" in t):
+    if re.fullmatch(r"(?:给(?:这个)?视频)?投(?:[一二两12](?:个|枚)?|个)?币(?:这个视频|视频)?", t):
         count = 2 if re.search(r"(?:两|2)(?:个|枚)?币?|两个币|两枚", t) else 1
         return _ok([("bilibili.coin", {"count": count}, [])])
-    if "收藏" in t and "取消收藏" not in t:
-        folder = None
-        fm = re.search(r"收藏(?:到|至|进|在)([^，。,.!！?？]{1,20}?)(?:收藏夹|文件夹|里|中)?$", t)
-        if fm:
-            folder = fm.group(1).strip()
-        return _ok([("bilibili.favorite", {"folder": folder} if folder else {}, [])])
-    if "评论" in t and any(k in t for k in ("关闭", "收起", "关掉", "关")):
+    if re.fullmatch(r"收藏(?:这个视频|视频)?", t):
+        return _ok([("bilibili.favorite", {}, [])])
+    if re.fullmatch(r"(?:关闭|收起|关掉|关)评论(?:区)?", t):
         return _ok([("bilibili.comments", {"open": False}, [])])
-    if "评论" in t and any(k in t for k in ("打开", "开", "看", "展开", "去", "进入")):
+    if re.fullmatch(r"(?:打开|开|看|展开|去|进入)评论(?:区)?", t):
         return _ok([("bilibili.comments", {"open": True}, [])])
-    if "弹幕" in t and any(k in t for k in ("发送", "发", "发个", "发一条", "发条", "写")):
-        text = ""
-        dm = re.search(r"弹幕(?:说|写|内容)?[：:，,]?(.+)$", t)
-        if dm:
-            text = dm.group(1).strip()
-        if not text:
-            dm = re.search(r"(?:发送|发)(?:一条|个|条)?(.+)$", t)
-            if dm:
-                text = dm.group(1).replace("弹幕", "").strip()
-        if text:
-            return _ok([("bilibili.send_danmaku", {"text": text[:30]}, [])])
+    if re.fullmatch(r"(?:发送|发)(?:一条|个|条)?弹幕", t):
         return _clarify("请说要发送的弹幕内容，例如“发送弹幕 好可爱”")
-    if any(k in t for k in ("快进", "后退", "回退", "倒退", "倒回")):
+    if re.fullmatch(r"(?:快进|后退|回退|倒退|倒回)(?:到第?)?[0-9零一二三四五六七八九十百两分秒钟]+", t):
         mm = re.search(r"到第?([0-9零一二三四五六七八九十百两]+)分([0-9零一二三四五六七八九十百两]+)秒", t)
         if mm:
             minutes, seconds = _cn_number(mm.group(1)), _cn_number(mm.group(2))
@@ -213,11 +265,11 @@ def rule_based_proposal(text: str, context=None) -> "DecisionProposal | None":
         if mm and _cn_number(mm.group(1)) is not None:
             return _ok([("bilibili.seek", {"delta_s": -_cn_number(mm.group(1))}, [])])
         return _clarify("请说快进多少秒，或快进到几分几秒")
-    if "下一集" in t or "下集" in t:
+    if t in ("下一集", "下集"):
         return _ok([("bilibili.next", {}, [])])
-    if "上一集" in t or "上集" in t:
+    if t in ("上一集", "上集"):
         return _ok([("bilibili.prev", {}, [])])
-    if any(k in t for k in ("音量", "声音")):
+    if re.fullmatch(r"(?:音量|声音)(?:调|调到|调成)?(?:大|高|响|小|低|轻|百分之[0-9零一二三四五六七八九十百两]+|[0-9]+%)", t):
         vm = re.search(r"百分之([0-9零一二三四五六七八九十百两]+)", t)
         if vm and _cn_number(vm.group(1)) is not None:
             return _ok([("system.volume", {"target": max(0, min(100, _cn_number(vm.group(1))))}, [])])
@@ -304,11 +356,11 @@ def rule_based_proposal(text: str, context=None) -> "DecisionProposal | None":
         return _clarify("没有可继续播放的视频，请先搜索并播放")
     if t in ("暂停播放", "暂停视频", "停止播放", "停", "停止"):
         return _ok([("bilibili.pause", {}, [])])
-    if any(k in t for k in ("停一下", "停住", "停下")) and not any(k in t for k in ("继续", "恢复", "播放")):
+    if t in ("停一下", "停住", "停下"):
         return _ok([("bilibili.pause", {}, [])])
-    if "暂停" in t and not any(k in t for k in ("继续", "恢复", "播放")):
+    if t == "暂停":
         return _ok([("bilibili.pause", {}, [])])
-    if any(k in t for k in ("继续", "恢复", "接着播")):
+    if t in ("继续", "恢复", "继续播放", "恢复播放", "接着播"):
         return _ok([("bilibili.resume", {}, [])])
     # Direct title: "播放/打开/点击 <视频标题>".  Prefer a visible search
     # snapshot; otherwise search the title and play its first result.
@@ -352,6 +404,6 @@ def rule_based_proposal(text: str, context=None) -> "DecisionProposal | None":
 
     # A spatial/ordinal target we could not resolve must never fall through to
     # the LLM, where it can become an invented search. Ask for context instead.
-    if any(k in t for k in ("第", "排", "行")) and ("视频" in t or "个" in t):
+    if re.search(r"第|[0-9一二三四五六七八九十]+[排行]",t) and ("视频" in t or "个" in t):
         return _clarify("请先搜索一个视频，再说第几排第几个；没有搜索上下文时不会猜测")
     return None

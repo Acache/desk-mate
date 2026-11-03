@@ -17,7 +17,7 @@ from uuid import UUID, uuid4
 
 from . import contracts
 from .config import AppConfig
-from .intent import apply_policy_guard, has_supported_intent, rule_based_proposal, unsupported_intent_reason
+from .intent import apply_policy_guard, has_supported_intent, personalization_candidate, rule_based_proposal, unsupported_intent_reason
 from .contracts import (
     CommandState,
     ConfirmPreview,
@@ -353,13 +353,18 @@ class Pipeline:
             # Prefer the deterministic R1 grammar for clear commands. The LLM
             # must not add an unspoken search/play action to "打开B站".
             proposal = rule_based_proposal(transcript.normalized_text, context)
-            if proposal is None and self.ctx.personalizer is not None:
+            route = "rules"
+            if proposal is None and self.ctx.personalizer is not None and personalization_candidate(transcript.normalized_text):
+                route = "personalizer"
                 proposal = self.ctx.personalizer.propose(transcript.normalized_text)
             if proposal is None:
+                route = "ollama"
                 proposal = await asyncio.to_thread(
                     self.ctx.decision.propose,
                     transcript.normalized_text, context, self.ctx.enabled_actions, deadline,
                 )
+            log.info("decision command=%s route=%s decision_ms=%d", command_id, route,
+                     int((time.perf_counter() - t_refresh) * 1000))
             proposal = apply_policy_guard(transcript.normalized_text, proposal)
             if self._cancelled(command_id):
                 return

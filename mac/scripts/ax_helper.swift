@@ -352,6 +352,14 @@ func main() {
         exit(2)
     }
     let command = args[1]
+    if command == "application-info" {
+        let app = NSRunningApplication.runningApplications(withBundleIdentifier: BILI_BUNDLE).first
+        let installed = NSWorkspace.shared.urlForApplication(withBundleIdentifier: BILI_BUNDLE)
+        emit(["ok":true,"running":app != nil,"installed":installed != nil,
+              "pid":app.map { Int($0.processIdentifier) } ?? 0,
+              "bundle_path":installed?.path ?? ""])
+        return
+    }
     if command == "trust" {
         emit(["ok": true, "trusted": AXIsProcessTrusted(), "bundle": BILI_BUNDLE])
         return

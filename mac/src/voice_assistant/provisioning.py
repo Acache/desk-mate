@@ -109,7 +109,11 @@ def send_bundle(port_name: str, bundle: dict[str, Any], timeout: float = 30.0) -
     if len(encoded) > MAX_BUNDLE:
         raise ProvisioningError("bundle too large")
     try:
-        port = serial.Serial(port_name, 115200, timeout=0.3, write_timeout=5, dsrdtr=False, rtscts=False)
+        port = serial.Serial(None, 115200, timeout=0.3, write_timeout=5, dsrdtr=False, rtscts=False)
+        port.dtr = False
+        port.rts = False
+        port.port = port_name
+        port.open()
     except serial.SerialException as exc:
         raise ProvisioningError(f"cannot open {port_name}: {exc}") from exc
     try:

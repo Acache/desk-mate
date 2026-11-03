@@ -118,6 +118,9 @@ class AppState:
         self.discovery: DiscoveryPublisher | None = None
         self.started_at = utc_now()
         self.ble_status = {"enabled": False, "phase": "disabled"}
+        self.ble_switching = False
+        from .desktop_control import BleController
+        self.ble_controller = BleController(self)
 
     async def notify_for(self, device_id: str):
         async def notify(message: Any) -> None:
@@ -176,6 +179,9 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        warm_task = None
+        if hasattr(decision, "prewarm"):
+            warm_task = asyncio.create_task(asyncio.to_thread(decision.prewarm))
         # Prewarm the local STT worker; model loading is not allowed to block
         # the socket event loop (it runs in a worker thread/process).
         try:
@@ -211,17 +217,21 @@ def create_app(
                 state.discovery.start()
             except Exception as exc:
                 log.warning("mDNS discovery not started: %s", exc)
-        ble_task = None
+        control_server = None
+        control_socket = None
+        if os.environ.get("VOICE_ASSISTANT_DESKTOP") == "1":
+            from .desktop_control import start_control_server
+            control_server,control_socket = await start_control_server(state)
         if ble_address:
-            from .ble_bridge import run_connector
-            ble_task = asyncio.create_task(run_connector(state, ble_address))
+            await state.ble_controller.select(ble_address,persist=False)
         yield
-        if ble_task:
-            ble_task.cancel()
-            try:
-                await ble_task
-            except asyncio.CancelledError:
-                pass
+        if control_server:
+            control_server.close()
+            await control_server.wait_closed()
+            control_socket.unlink(missing_ok=True)
+        await state.ble_controller.close()
+        if warm_task:
+            warm_task.cancel()
         if getattr(state, "training_task", None):
             state.training_task.cancel()
         for task in list(state.tasks):
@@ -236,15 +246,20 @@ def create_app(
 
     @app.get("/healthz")
     async def healthz():
-        ready, code = state.ready()
+        from .adapters.cdp_player import status as cdp_status
+        (ready, code), stt_status, decision_status, cdp = await asyncio.gather(
+            asyncio.to_thread(state.ready), asyncio.to_thread(stt.health),
+            asyncio.to_thread(decision.health), asyncio.to_thread(cdp_status),
+        )
         return {
             "ok": True,
             "ready": ready,
             "code": code.value if code else None,
             "server_id": cfg.server.server_id if cfg.server else None,
             "tls_name": cfg.server.tls_name if cfg.server else None,
-            "stt": stt.health(),
-            "decision": decision.health(),
+            "stt": stt_status,
+            "decision": decision_status,
+            "cdp": cdp,
             "capabilities": list(state.capabilities()),
             "reconciled": reconcile,
             "active_command": (db.active_command() or {}).get("id"),

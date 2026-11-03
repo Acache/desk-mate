@@ -191,7 +191,7 @@ async def serve_remote_session(state, ws, device_id: str):
                     log.warning("feedback auto-analysis scheduling failed: %s", exc)
                 continue
             if isinstance(parsed, contracts.Begin):
-                if active_command or db.active_command():
+                if getattr(state,"ble_switching",False) or active_command or db.active_command():
                     await ws.send_text(_json(_error(parsed.msg_id, ErrorCode.BUSY, "another command is active")))
                     continue
                 try:

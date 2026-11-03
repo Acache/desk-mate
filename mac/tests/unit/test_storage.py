@@ -203,7 +203,12 @@ def test_single_writer_concurrency(env):
     for t in threads:
         t.join()
     # No crash, and every accepted frame is contiguous in the staging file.
+    pcm = (cfg.staging_dir / f"{CID}.pcm.part").read_bytes()
+    count = len(pcm) // 640
+    assert 1 <= count <= 10 and len(pcm) % 640 == 0
+    assert pcm == b"".join(frame(i)[8:] for i in range(count))
+    # A losing writer can leave fewer than the ten-frame durable checkpoint.
+    # Sealing must persist the actual accepted prefix in either schedule.
+    stages.seal(CID,count,len(pcm),hashlib.sha256(pcm).hexdigest())
     row = db.get_command(CID)
-    assert row["frame_count"] >= 1
-    staged = (cfg.staging_dir / f"{CID}.pcm.part").stat().st_size
-    assert staged == row["pcm_bytes"]
+    assert row["frame_count"] == count and row["pcm_bytes"] == len(pcm)

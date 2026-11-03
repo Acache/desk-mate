@@ -334,6 +334,10 @@ def load_config(root: Path | None = None, create: bool = True) -> AppConfig:
         cfg.ready = bool(data.get("ready", True))
         cfg.extra = dict(data.get("extra", {}))
     cfg.ensure_layout()
+    # Bundle supervisor supplies its own loopback inference service. Do not
+    # persist a developer machine's runtime paths into portable configuration.
+    cfg.ollama_url = os.environ.get("VOICE_ASSISTANT_OLLAMA_URL", cfg.ollama_url)
+    cfg.ollama_model = os.environ.get("VOICE_ASSISTANT_OLLAMA_MODEL", cfg.ollama_model)
     if create:
         cfg.server = generate_identity(root, cfg.port)
         if not paths["config.json"].exists():

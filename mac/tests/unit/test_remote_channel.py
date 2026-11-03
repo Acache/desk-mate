@@ -18,6 +18,21 @@ class Manager:
     async def attach(self,device,channel):self.attached=channel
     async def detach(self,device,channel):self.attached=None
 
+
+def test_begin_is_refused_during_ble_switch():
+    async def run():
+        server,device,command=map(str,[uuid4(),uuid4(),uuid4()])
+        state=SimpleNamespace(cfg=SimpleNamespace(server=SimpleNamespace(server_id=server)),
+                              db=SimpleNamespace(record_session=lambda *a:None,get_command=lambda _:None),stages=None,service=None,
+                              manager=Manager(),ready=lambda:(True,None),capabilities=lambda:(),ble_switching=True)
+        hello={'v':1,'type':'hello','msg_id':1,'device_id':device,'server_id':server,'firmware_version':'test','boot_id':str(uuid4())}
+        begin={'v':1,'type':'begin','msg_id':2,'command_id':command,'kind':'audio',
+               'format':{'encoding':'s16le','rate':16000,'channels':1},'trigger':'esp32_ptt'}
+        channel=Channel([{'text':json.dumps(hello)},{'text':json.dumps(begin)}])
+        await serve_remote_session(state,channel,device)
+        assert channel.sent[-1]['code']=='BUSY'
+    asyncio.run(run())
+
 def test_cross_device_status_cancel_feedback_rejected():
     async def run(kind):
         server,device,other,command=map(str,[uuid4(),uuid4(),uuid4(),uuid4()])

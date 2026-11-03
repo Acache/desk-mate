@@ -11,6 +11,38 @@ def test_noise_and_short_text_rejected():
         assert not has_supported_intent(text), text
 
 
+def test_compound_and_questions_reach_semantic_model():
+    from voice_assistant.intent import rule_based_proposal, is_semantic_request
+    for text in ("声音小一点，顺便把这个收藏到房车", "点赞然后收藏", "不要点赞，只收藏", "我刚才点赞了吗？", "点赞收藏"):
+        assert rule_based_proposal(text) is None, text
+    assert is_semantic_request("不要点赞，只收藏")
+    assert has_supported_intent("小声一点")
+
+
+def test_classifier_never_absorbs_r2_or_negation():
+    from voice_assistant.intent import personalization_candidate, apply_policy_guard, _ok
+    for text in ("声音稍微大一点", "不要暂停", "暂停然后收藏", "打开第三个视频"):
+        assert not personalization_candidate(text)
+    assert personalization_candidate("帮我暂停一会儿")
+    for text in ("取消点赞", "我刚才点赞了吗？"):
+        p = apply_policy_guard(text,_ok([("bilibili.like",{},[])]))
+        assert not p.actions
+
+
+def test_literal_payload_is_not_parsed_as_an_action_word():
+    from voice_assistant.intent import rule_based_proposal
+    p = rule_based_proposal("发送弹幕 Hello, 别忘了点赞！")
+    assert p.actions[0].action == "bilibili.send_danmaku"
+    assert p.actions[0].params["text"] == "Hello, 别忘了点赞！"
+    p = rule_based_proposal("搜索如何收藏视频")
+    assert p.actions[0].action == "bilibili.search"
+    assert p.actions[0].params["query"] == "如何收藏视频"
+    assert rule_based_proposal("发送弹幕 " + "字"*31).status.value == "clarify_needed"
+    assert rule_based_proposal("发送弹幕 Hello。").actions[0].params["text"] == "Hello。"
+    assert rule_based_proposal("收藏到 My Work 文件夹").actions[0].params["folder"] == "My Work"
+    assert rule_based_proposal("收藏到"+"字"*33).status.value == "clarify_needed"
+
+
 def _ctx():
     import time
     from voice_assistant.contracts import TrustedContext

@@ -1,0 +1,340 @@
+[
+  {
+    "id": "pause",
+    "text": "暂停",
+    "expected": {
+      "status": "ok",
+      "actions": [
+        {
+          "action": "bilibili.pause",
+          "params": {},
+          "after": []
+        }
+      ]
+    }
+  },
+  {
+    "id": "open",
+    "text": "打开B站",
+    "expected": {
+      "status": "ok",
+      "actions": [
+        {
+          "action": "bilibili.open",
+          "params": {},
+          "after": []
+        }
+      ]
+    },
+    "player": false
+  },
+  {
+    "id": "seek",
+    "text": "快进十秒",
+    "expected": {
+      "status": "ok",
+      "actions": [
+        {
+          "action": "bilibili.seek",
+          "params": {
+            "delta_s": 10
+          },
+          "after": []
+        }
+      ]
+    }
+  },
+  {
+    "id": "folder",
+    "text": "收藏到房车",
+    "expected": {
+      "status": "ok",
+      "actions": [
+        {
+          "action": "bilibili.favorite",
+          "params": {
+            "folder": "房车"
+          },
+          "after": []
+        }
+      ]
+    }
+  },
+  {
+    "id": "coin",
+    "text": "投两个币",
+    "expected": {
+      "status": "ok",
+      "actions": [
+        {
+          "action": "bilibili.coin",
+          "params": {
+            "count": 2
+          },
+          "after": []
+        }
+      ]
+    }
+  },
+  {
+    "id": "volume",
+    "text": "音量调到百分之六十",
+    "expected": {
+      "status": "ok",
+      "actions": [
+        {
+          "action": "system.volume",
+          "params": {
+            "target": 60
+          },
+          "after": []
+        }
+      ]
+    }
+  },
+  {
+    "id": "literal",
+    "text": "发送弹幕 Hello, 别忘了点赞！",
+    "expected": {
+      "status": "ok",
+      "actions": [
+        {
+          "action": "bilibili.send_danmaku",
+          "params": {
+            "text": "Hello, 别忘了点赞！"
+          },
+          "after": []
+        }
+      ]
+    }
+  },
+  {
+    "id": "quiet",
+    "text": "小声一点",
+    "expected": {
+      "status": "ok",
+      "actions": [
+        {
+          "action": "system.vol_down",
+          "params": {
+            "delta": 5
+          },
+          "after": []
+        }
+      ]
+    }
+  },
+  {
+    "id": "loud",
+    "text": "声音稍微大一点",
+    "expected": {
+      "status": "ok",
+      "actions": [
+        {
+          "action": "system.vol_up",
+          "params": {
+            "delta": 5
+          },
+          "after": []
+        }
+      ]
+    }
+  },
+  {
+    "id": "casual-seek",
+    "text": "往后跳十秒",
+    "expected": {
+      "status": "ok",
+      "actions": [
+        {
+          "action": "bilibili.seek",
+          "params": {
+            "delta_s": 10
+          },
+          "after": []
+        }
+      ]
+    }
+  },
+  {
+    "id": "absolute-seek",
+    "text": "跳到一分三十秒",
+    "expected": {
+      "status": "ok",
+      "actions": [
+        {
+          "action": "bilibili.seek",
+          "params": {
+            "target_s": 90
+          },
+          "after": []
+        }
+      ]
+    }
+  },
+  {
+    "id": "compound",
+    "text": "声音小一点，顺便把这个收藏到房车",
+    "expected": {
+      "status": "ok",
+      "actions": [
+        {
+          "action": "system.vol_down",
+          "params": {
+            "delta": 5
+          },
+          "after": []
+        },
+        {
+          "action": "bilibili.favorite",
+          "params": {
+            "folder": "房车"
+          },
+          "after": [
+            0
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "id": "compound-like",
+    "text": "点赞然后收藏",
+    "expected": {
+      "status": "ok",
+      "actions": [
+        {
+          "action": "bilibili.like",
+          "params": {},
+          "after": []
+        },
+        {
+          "action": "bilibili.favorite",
+          "params": {},
+          "after": [
+            0
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "id": "negative",
+    "text": "不要点赞",
+    "expected": {
+      "status": "out_of_scope",
+      "actions": []
+    }
+  },
+  {
+    "id": "correction",
+    "text": "不要点赞，只收藏",
+    "expected": {
+      "status": "ok",
+      "actions": [
+        {
+          "action": "bilibili.favorite",
+          "params": {},
+          "after": []
+        }
+      ]
+    }
+  },
+  {
+    "id": "open-only",
+    "text": "只打开B站，不要播放",
+    "expected": {
+      "status": "ok",
+      "actions": [
+        {
+          "action": "bilibili.open",
+          "params": {},
+          "after": []
+        }
+      ]
+    }
+  },
+  {
+    "id": "question",
+    "text": "我刚才点赞了吗？",
+    "expected": {
+      "status": "clarify_needed",
+      "actions": []
+    }
+  },
+  {
+    "id": "missing-search",
+    "text": "播放第三个",
+    "expected": {
+      "status": "clarify_needed",
+      "actions": []
+    },
+    "player": false
+  },
+  {
+    "id": "vague",
+    "text": "播放刚才那个视频",
+    "expected": {
+      "status": "clarify_needed",
+      "actions": []
+    },
+    "player": false
+  },
+  {
+    "id": "unsupported",
+    "text": "关注这个UP主",
+    "expected": {
+      "status": "out_of_scope",
+      "actions": []
+    }
+  },
+  {
+    "id": "unlike",
+    "text": "取消点赞",
+    "expected": {
+      "status": "out_of_scope",
+      "actions": []
+    }
+  },
+  {
+    "id": "comments",
+    "text": "把评论区收起来",
+    "expected": {
+      "status": "ok",
+      "actions": [
+        {
+          "action": "bilibili.comments",
+          "params": {
+            "open": false
+          },
+          "after": []
+        }
+      ]
+    }
+  },
+  {
+    "id": "search-literal",
+    "text": "搜索如何收藏视频",
+    "expected": {
+      "status": "ok",
+      "actions": [
+        {
+          "action": "bilibili.search",
+          "params": {
+            "query": "如何收藏视频"
+          },
+          "after": []
+        }
+      ]
+    },
+    "player": false
+  },
+  {
+    "id": "long-danmaku",
+    "text": "发送弹幕 字字字字字字字字字字字字字字字字字字字字字字字字字字字字字字字",
+    "expected": {
+      "status": "clarify_needed",
+      "actions": []
+    }
+  }
+]

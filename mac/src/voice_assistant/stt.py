@@ -7,6 +7,7 @@ MODEL_UNAVAILABLE; it never falls back to a cloud service.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import queue
 import re
@@ -178,14 +179,14 @@ class SenseVoiceWorker:
     """A single, prewarmed FunASR worker process with a kill/restart path."""
 
     def __init__(self, model: str = SENSEVOICE_MODEL, start_timeout: float = 300.0):
-        self.model = model
+        self.model = os.environ.get("VOICE_STT_MODEL", model)
         self.start_timeout = start_timeout
         self.proc: subprocess.Popen | None = None
         self._queue: queue.Queue[str | None] = queue.Queue()
         self._reader: threading.Thread | None = None
         self._ready = False
         self._digest: str | None = None
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
     def start(self) -> None:
         with self._lock:
@@ -199,8 +200,16 @@ class SenseVoiceWorker:
                 text=True, bufsize=1, env=env,
             )
             self._queue = queue.Queue()
-            self._reader = threading.Thread(target=self._read_loop, daemon=True)
+            self._reader = threading.Thread(target=self._read_loop, args=(self.proc.stdout,self._queue), daemon=True)
             self._reader.start()
+            # FunASR writes loader diagnostics to stderr. Drain continuously;
+            # an unread PIPE can fill and deadlock offline model startup.
+            proc = self.proc
+            def drain_stderr():
+                assert proc and proc.stderr
+                for line in proc.stderr:
+                    logging.getLogger(__name__).debug("STT worker: %s",line.rstrip()[:1000])
+            threading.Thread(target=drain_stderr,daemon=True).start()
             deadline = time.time() + self.start_timeout
             msg = None
             while time.time() < deadline:
@@ -228,11 +237,10 @@ class SenseVoiceWorker:
             self._ready = True
             self._digest = msg.get("model_digest")
 
-    def _read_loop(self) -> None:
-        assert self.proc and self.proc.stdout
-        for line in self.proc.stdout:
-            self._queue.put(line.strip())
-        self._queue.put(None)
+    def _read_loop(self, stream, output) -> None:
+        for line in stream:
+            output.put(line.strip())
+        output.put(None)
 
     def transcribe(self, wav_path: Path, deadline: float) -> Transcript:
         if not self._ready:
@@ -278,7 +286,8 @@ class SenseVoiceWorker:
             if self.proc:
                 try:
                     self.proc.kill()
-                except OSError:
+                    self.proc.wait(timeout=2)
+                except (OSError,subprocess.TimeoutExpired):
                     pass
                 self.proc = None
 

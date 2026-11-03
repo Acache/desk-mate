@@ -204,9 +204,28 @@ async def authenticate(channel, state):
     await send({'type':'ble_auth_complete', 'proof':proof(key, 'complete', text)})
     return device, key
 
+def connection_error(exc,phase):
+    message=str(exc).lower()
+    if "usb authorization" in message:
+        return {"error_code":"BLE_AUTH_REQUIRED","message":"这块设备尚未授权给当前服务端","hint":"通过 USB 连接新板子，选择“通过 USB 授权设备”"}
+    if "proof mismatch" in message or "server or epoch mismatch" in message:
+        return {"error_code":"BLE_AUTH_MISMATCH","message":"设备与当前服务端的授权不匹配","hint":"确认选择的是目标板子，并通过 USB 重新授权"}
+    if "page 2" in message:
+        return {"error_code":"BLE_SELECT_MAC","message":"设备尚未选中这台 Mac","hint":"请在设备第2屏选择并连接当前 Mac，然后等待自动重试"}
+    if "voice service missing" in message:
+        return {"error_code":"BLE_SERVICE_MISSING","message":"设备没有兼容的蓝牙语音服务","hint":"确认固件版本，断开并重新配对设备以刷新蓝牙服务"}
+    if any(word in message for word in ("not authorized","unauthorized","permission","denied")):
+        return {"error_code":"BLE_PERMISSION","message":"Desk-Mate 没有蓝牙访问权限","hint":"在系统设置的隐私与安全中允许 Desk-Mate 使用蓝牙"}
+    if any(word in message for word in ("powered off","poweredoff","bluetooth is off")):
+        return {"error_code":"BLUETOOTH_OFF","message":"Mac 蓝牙已关闭","hint":"打开系统蓝牙后会自动重试"}
+    if isinstance(exc,(TimeoutError,asyncio.TimeoutError)):
+        return {"error_code":"BLE_TIMEOUT","message":"设备连接或认证超时","hint":"保持设备唤醒并靠近 Mac，在第2屏连接这台 Mac；首次使用请先通过 USB 授权"}
+    return {"error_code":"BLE_CONNECTION_FAILED","message":"蓝牙连接暂时失败，正在重试","hint":"检查设备电源、距离和第2屏连接；详细信息可在诊断中查看"}
+
+
 async def run_connector(state, address):
     from bleak import BleakClient
-    state.ble_status = {"enabled": True, "phase": "connecting", "authenticated": False}
+    state.ble_status.update(enabled=True,phase="connecting",authenticated=False,address=address)
     logged_error = None
     while True:
         state.ble_status.update(phase="resolving", authenticated=False)
@@ -243,7 +262,8 @@ async def run_connector(state, address):
                 channel.worker = asyncio.create_task(channel._pump())
                 state.ble_status.update(phase="authenticating", mtu=mtu, generation=generation)
                 device_id, key = await authenticate(channel, state)
-                state.ble_status.update(phase="authenticated", authenticated=True, last_error=None)
+                state.ble_status.update(phase="authenticated", authenticated=True, last_error=None,
+                                        error_code=None,message="蓝牙语音输入已连接",hint=None)
                 logged_error = None
                 log.info('BLE companion authenticated for device %s', device_id)
                 session = asyncio.create_task(serve_remote_session(state, channel, device_id))
@@ -265,6 +285,7 @@ async def run_connector(state, address):
             # Protocol errors have static descriptions; never log auth payloads.
             error = str(exc) if isinstance(exc, WireError) else type(exc).__name__
             state.ble_status.update(failed_phase=state.ble_status.get('phase'), phase='retry', authenticated=False, last_error=error)
+            state.ble_status.update(connection_error(exc,state.ble_status.get("failed_phase")))
             if error != logged_error:
                 log.warning('BLE companion (%s): %s', state.ble_status.get('failed_phase'), error)
                 logged_error = error

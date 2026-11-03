@@ -1,0 +1,301 @@
+[
+  {
+    "id": "quiet-polite",
+    "text": "麻烦声音降低一些",
+    "expected": {
+      "status": "ok",
+      "actions": [
+        {
+          "action": "system.vol_down",
+          "params": {
+            "delta": 5
+          },
+          "after": []
+        }
+      ]
+    }
+  },
+  {
+    "id": "loud-casual",
+    "text": "把声音加大一点点",
+    "expected": {
+      "status": "ok",
+      "actions": [
+        {
+          "action": "system.vol_up",
+          "params": {
+            "delta": 5
+          },
+          "after": []
+        }
+      ]
+    }
+  },
+  {
+    "id": "rewind-casual",
+    "text": "往回退十五秒",
+    "expected": {
+      "status": "ok",
+      "actions": [
+        {
+          "action": "bilibili.seek",
+          "params": {
+            "delta_s": -15
+          },
+          "after": []
+        }
+      ]
+    }
+  },
+  {
+    "id": "time-unseen",
+    "text": "跳到两分零五秒",
+    "expected": {
+      "status": "ok",
+      "actions": [
+        {
+          "action": "bilibili.seek",
+          "params": {
+            "target_s": 125
+          },
+          "after": []
+        }
+      ]
+    }
+  },
+  {
+    "id": "folder-unseen",
+    "text": "这条视频存进旅行收藏夹",
+    "expected": {
+      "status": "ok",
+      "actions": [
+        {
+          "action": "bilibili.favorite",
+          "params": {
+            "folder": "旅行"
+          },
+          "after": []
+        }
+      ]
+    }
+  },
+  {
+    "id": "like-casual",
+    "text": "给这条点个赞",
+    "expected": {
+      "status": "ok",
+      "actions": [
+        {
+          "action": "bilibili.like",
+          "params": {},
+          "after": []
+        }
+      ]
+    }
+  },
+  {
+    "id": "compound-comments",
+    "text": "先把音量降一点，再打开评论区",
+    "expected": {
+      "status": "ok",
+      "actions": [
+        {
+          "action": "system.vol_down",
+          "params": {
+            "delta": 5
+          },
+          "after": []
+        },
+        {
+          "action": "bilibili.comments",
+          "params": {
+            "open": true
+          },
+          "after": [
+            0
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "id": "compound-folder",
+    "text": "收藏到旅行，然后把声音调低",
+    "expected": {
+      "status": "ok",
+      "actions": [
+        {
+          "action": "bilibili.favorite",
+          "params": {
+            "folder": "旅行"
+          },
+          "after": []
+        },
+        {
+          "action": "system.vol_down",
+          "params": {
+            "delta": 5
+          },
+          "after": [
+            0
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "id": "negated-coin",
+    "text": "不要投币，给它点个赞就行",
+    "expected": {
+      "status": "ok",
+      "actions": [
+        {
+          "action": "bilibili.like",
+          "params": {},
+          "after": []
+        }
+      ]
+    }
+  },
+  {
+    "id": "negated-favorite",
+    "text": "别收藏，先暂停",
+    "expected": {
+      "status": "ok",
+      "actions": [
+        {
+          "action": "bilibili.pause",
+          "params": {},
+          "after": []
+        }
+      ]
+    }
+  },
+  {
+    "id": "negated-like",
+    "text": "我没有让你点赞",
+    "expected": {
+      "status": "out_of_scope",
+      "actions": []
+    }
+  },
+  {
+    "id": "comments-colloquial",
+    "text": "能看看评论吗",
+    "expected": {
+      "status": "ok",
+      "actions": [
+        {
+          "action": "bilibili.comments",
+          "params": {
+            "open": true
+          },
+          "after": []
+        }
+      ]
+    }
+  },
+  {
+    "id": "danmaku-colloquial",
+    "text": "弹幕发一句 Hello",
+    "expected": {
+      "status": "ok",
+      "actions": [
+        {
+          "action": "bilibili.send_danmaku",
+          "params": {
+            "text": "Hello"
+          },
+          "after": []
+        }
+      ]
+    }
+  },
+  {
+    "id": "folder-literal",
+    "text": "这个收藏到工作学习文件夹",
+    "expected": {
+      "status": "ok",
+      "actions": [
+        {
+          "action": "bilibili.favorite",
+          "params": {
+            "folder": "工作学习"
+          },
+          "after": []
+        }
+      ]
+    }
+  },
+  {
+    "id": "unsupported-follow",
+    "text": "把这个UP关注一下",
+    "expected": {
+      "status": "out_of_scope",
+      "actions": []
+    }
+  },
+  {
+    "id": "volume-unseen",
+    "text": "把音量设成百分之三十五",
+    "expected": {
+      "status": "ok",
+      "actions": [
+        {
+          "action": "system.volume",
+          "params": {
+            "target": 35
+          },
+          "after": []
+        }
+      ]
+    }
+  },
+  {
+    "id": "comments-close",
+    "text": "把评论关掉",
+    "expected": {
+      "status": "ok",
+      "actions": [
+        {
+          "action": "bilibili.comments",
+          "params": {
+            "open": false
+          },
+          "after": []
+        }
+      ]
+    }
+  },
+  {
+    "id": "open-casual",
+    "text": "给我开B站",
+    "expected": {
+      "status": "ok",
+      "actions": [
+        {
+          "action": "bilibili.open",
+          "params": {},
+          "after": []
+        }
+      ]
+    }
+  },
+  {
+    "id": "missing-target-unseen",
+    "text": "打开第二个视频",
+    "expected": {
+      "status": "clarify_needed",
+      "actions": []
+    },
+    "player": false
+  },
+  {
+    "id": "unsupported-comment",
+    "text": "发表评论你好",
+    "expected": {
+      "status": "out_of_scope",
+      "actions": []
+    }
+  }
+]

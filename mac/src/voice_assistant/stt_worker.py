@@ -25,6 +25,7 @@ def main() -> int:
     try:
         from funasr import AutoModel  # type: ignore
     except Exception as exc:  # pragma: no cover - depends on optional runtime
+        sys.stdout = real_stdout
         emit({"ready": False, "error": f"funasr unavailable: {exc}"})
         return 1
     try:
