@@ -60,7 +60,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        statusItem.button?.title = "Desk-Mate · 启动中"
+        if let button = statusItem.button {
+            let image = NSImage(systemSymbolName: "waveform.circle", accessibilityDescription: "Desk-Mate")
+            image?.isTemplate = true
+            button.image = image
+            button.imagePosition = .imageOnly
+            button.toolTip = "Desk-Mate · 启动中"
+        }
         rebuildMenu()
         start()
         timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in self?.refresh() }
@@ -118,7 +124,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let p = supervisor else { return }
         stopping = true
         p.terminate()
-        statusItem.button?.title = "Desk-Mate · 停止中"
+        statusItem.button?.toolTip = "Desk-Mate · 停止中"
     }
 
     @objc func refresh() {
@@ -135,7 +141,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         else if phase == "failed" { label = "异常" }
         else if pendingDevice != nil { label = "连接设备中" }
         else { label = labels[phase] ?? phase }
-        statusItem.button?.title = "Desk-Mate · \(label)"
+        statusItem.button?.toolTip = "Desk-Mate · \(label)"
         rebuildMenu()
         if !busy && !stopping { reportConnectionState() }
     }
@@ -215,7 +221,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(item("通过 USB 授权设备…", #selector(pairDevice), enabled: !busy))
         menu.addItem(item("打开 B站并启用本地控制…", #selector(enableCDP), enabled: !busy))
         menu.addItem(.separator())
-        menu.addItem(item("权限与首次使用…", #selector(permissions)))
+        let permissionsItem = NSMenuItem(title: "权限与首次使用", action: nil, keyEquivalent: "")
+        let permissionsMenu = NSMenu()
+        permissionsMenu.addItem(item("辅助功能…", #selector(openAccessibilityPane)))
+        permissionsMenu.addItem(item("屏幕录制…", #selector(openScreenPane)))
+        permissionsMenu.addItem(item("蓝牙…", #selector(openBluetoothPane)))
+        permissionsMenu.addItem(item("麦克风…", #selector(openMicrophonePane)))
+        permissionsMenu.addItem(.separator())
+        permissionsMenu.addItem(item("权限说明与检查…", #selector(permissions)))
+        permissionsItem.submenu = permissionsMenu
+        menu.addItem(permissionsItem)
         menu.addItem(item("查看诊断状态…", #selector(diagnostics)))
         menu.addItem(item("打开日志文件夹", #selector(logs)))
         menu.addItem(item("导出诊断…", #selector(exportDiagnostics), enabled: !busy))
@@ -341,14 +356,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    @objc func openAccessibilityPane() { openPrivacyPane("Privacy_Accessibility") }
+    @objc func openScreenPane() { openPrivacyPane("Privacy_ScreenCapture") }
+    @objc func openBluetoothPane() { openPrivacyPane("Privacy_Bluetooth") }
+    @objc func openMicrophonePane() { openPrivacyPane("Privacy_Microphone") }
+
+    /// Open the exact privacy sub-pane. macOS 13+ moved these anchors under
+    /// PrivacySecurity.extension; older systems use preference.security. Try
+    /// the modern URL first and fall back to the legacy one and then the root.
+    func openPrivacyPane(_ anchor: String) {
+        let candidates = [
+            "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?\(anchor)",
+            "x-apple.systempreferences:com.apple.preference.security?\(anchor)",
+            "x-apple.systempreferences:com.apple.preference.security",
+        ]
+        for raw in candidates {
+            if let url = URL(string: raw), NSWorkspace.shared.open(url) { return }
+        }
+    }
+
     @objc func permissions() {
         let ax = AXIsProcessTrusted()
         let screen = CGPreflightScreenCaptureAccess()
-        if alert("权限与首次使用", "辅助功能：\(ax ? "已授权" : "未授权")\n屏幕录制：\(screen ? "已授权" : "未授权")\n\n在系统设置中授权 Desk-Mate 的辅助功能、屏幕录制及蓝牙。随后通过 USB 授权设备，选择蓝牙设备，再启用 B站本地控制。授权后请退出并重新打开 App。", confirm: "打开权限设置") {
+        if alert("权限与首次使用", "辅助功能：\(ax ? "已授权" : "未授权")\n屏幕录制：\(screen ? "已授权" : "未授权")\n\n菜单「权限与首次使用」可直达这四项权限。随后通过 USB 授权设备，选择蓝牙设备，再启用 B站本地控制。授权后请退出并重新打开 App。", confirm: "打开权限设置") {
             let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
             _ = AXIsProcessTrustedWithOptions(options)
             _ = CGRequestScreenCaptureAccess()
-            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security") { NSWorkspace.shared.open(url) }
+            openPrivacyPane("Privacy_Accessibility")
         }
     }
 
