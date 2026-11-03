@@ -40,7 +40,7 @@ class Status:public NimBLECharacteristicCallbacks{
 };
 }
 bool ble_voice_begin(NimBLEServer*s){
- server=s;incoming=xQueueCreate(32,sizeof(Packet));received=xQueueCreate(2,sizeof(BvMessage));outgoing=xQueueCreate(4,sizeof(BvMessage));
+ server=s;incoming=xQueueCreate(32,sizeof(Packet));received=xQueueCreate(8,sizeof(BvMessage));outgoing=xQueueCreate(4,sizeof(BvMessage));
  if(!incoming||!received||!outgoing)return false;
  auto* service=s->createService(BV_SERVICE);
  auto* rx=service->createCharacteristic(BV_RX,NIMBLE_PROPERTY::WRITE|NIMBLE_PROPERTY::WRITE_NR|NIMBLE_PROPERTY::WRITE_ENC,244);
@@ -53,6 +53,8 @@ void ble_voice_reset(){reset=true;}
 void ble_voice_enable(bool value){enabled=value;reset=true;}
 void ble_voice_audio(bool value){audio_active=value;}
 bool ble_voice_writable(){return outgoing&&uxQueueSpacesAvailable(outgoing)>0;}
+uint16_t ble_voice_queue_free(){return outgoing?(uint16_t)uxQueueSpacesAvailable(outgoing):0;}
+void ble_voice_stats(uint32_t *s,uint32_t *a){if(s)*s=sent;if(a)*a=acked;}
 bool ble_voice_send(uint8_t kind,const uint8_t*b,size_t n){
  BvLink v;ble_voice_link(&v);if(!v.ready||!n||n>BV_MAX||!outgoing)return false;
  // Only the voice transport task calls send; keep the 2KB queue scratch off its stack.
@@ -62,13 +64,33 @@ bool ble_voice_receive(BvMessage*m){return received&&xQueueReceive(received,m,0)
 void ble_voice_poll(uint16_t handle,uint32_t generation,bool ready){
  if(!incoming)return;
  BvLink v;ble_voice_link(&v);bool available=enabled.load()&&ready&&subscribed.load()==generation;
- if(v.generation!=generation||v.ready!=available||reset.exchange(false)||overflow.exchange(false)){
+ // Diagnose silent-link reports: only this log shows whether the voice link
+ // actually lost readiness, and whether the TX queue/window is stuck.
+ static uint32_t diag_at=0;
+ if(v.ready!=available||millis()-diag_at>=10000){
+  diag_at=millis();
+  Serial.printf("BLE VOICE: ready=%d sub=%lu gen=%lu enabled=%d model=%d sent=%lu acked=%lu q=%u\n",
+   (int)available,(unsigned long)subscribed.load(),(unsigned long)generation,(int)enabled.load(),
+   (int)ready,(unsigned long)sent,(unsigned long)acked,(unsigned)ble_voice_queue_free());
+ }
+ bool generation_changed=v.generation!=generation;
+ bool do_reset=reset.exchange(false);
+ bool overflowed=overflow.exchange(false);
+ bool hard_reset=generation_changed||do_reset||overflowed;
+ if(hard_reset) Serial.printf("BLE VOICE: session reset gen=%d reset=%d overflow=%d ready=%d\n",
+   (int)generation_changed,(int)do_reset,(int)overflowed,(int)available);
+ if(hard_reset){
   clear();v.epoch=esp_random();if(!v.epoch)v.epoch=1;v.generation=generation;v.ready=available;
   if(available){auto info=server->getPeerInfoByHandle(handle);v.mtu=info.getMTU();BleSnapshot snap;ble_manager_read(&snap);
    if(snap.current>=0){strlcpy(v.address,snap.hosts[snap.current].address,sizeof(v.address));v.type=snap.hosts[snap.current].type;}
    server->setDataLen(handle,251);server->updateConnParams(handle,12,24,0,200);fast_interval=false;
    server->updatePhy(handle,BLE_GAP_LE_PHY_2M_MASK,BLE_GAP_LE_PHY_2M_MASK,0);
   }
+  portENTER_CRITICAL(&mux);current_link=v;portEXIT_CRITICAL(&mux);
+ } else if(v.ready!=available){
+  /* Transient data-path flap (e.g. an HID subscription blip): keep the epoch,
+   * queues and authenticated session; only the ready flag changes. */
+  v.ready=available;
   portENTER_CRITICAL(&mux);current_link=v;portEXIT_CRITICAL(&mux);
  }
  if(!v.ready)return;
@@ -81,15 +103,20 @@ void ble_voice_poll(uint16_t handle,uint32_t generation,bool ready){
  for(int i=0;i<32&&xQueueReceive(incoming,&p,0)==pdTRUE;i++){
   if(p.handle!=handle||p.generation!=generation||bv_u32(p.bytes+2)!=v.epoch)continue;
   if(p.bytes[0]==1&&p.bytes[1]==3&&p.length==16&&!bv_u16(p.bytes+10)&&!bv_u16(p.bytes+12)&&!bv_u16(p.bytes+14)){
-   uint32_t a=bv_u32(p.bytes+6);if(a>=acked&&a<=sent){acked=a;last_ack=millis();}else reset=true;
+   uint32_t a=bv_u32(p.bytes+6);if(a>=acked&&a<=sent){acked=a;last_ack=millis();}
    continue;
   }
   int result=bv_append(&assembly,p.bytes,p.length,v.epoch);if(result<0){reset=true;break;}
   if(result==1){static BvMessage m={};m.kind=assembly.kind;m.length=assembly.total;m.epoch=v.epoch;memcpy(m.bytes,assembly.bytes,m.length+1);
    if(xQueueSend(received,&m,0)!=pdTRUE){reset=true;break;}}
-  if(result==1||assembly.next%4==0){uint8_t ack[16];bv_header(ack,3,v.epoch,assembly.next,0,0,0);if(!tx->notify(ack,16,handle)){reset=true;break;}}
+  if(result==1||assembly.next%4==0){uint8_t ack[16];bv_header(ack,3,v.epoch,assembly.next,0,0,0);
+   /* A transient controller buffer shortage must not invalidate the
+    * authenticated session: the next cumulative ACK covers this one. */
+   tx->notify(ack,16,handle);}
  }
- if(sent>acked&&millis()-last_ack>2000){reset=true;return;}
+ if(sent>acked&&millis()-last_ack>10000){
+  Serial.printf("BLE VOICE: ack window stalled sent=%lu acked=%lu\n",(unsigned long)sent,(unsigned long)acked);
+  reset=true;return;}
  for(int i=0;i<8&&sent-acked<BV_WINDOW;i++){
   if(!sending.length){if(xQueueReceive(outgoing,&sending,0)!=pdTRUE)break;offset=0;if(sending.epoch!=v.epoch){sending.length=0;continue;}}
   if(v.mtu<=BV_HEADER+3){reset=true;break;}

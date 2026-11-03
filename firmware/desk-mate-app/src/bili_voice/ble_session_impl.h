@@ -16,11 +16,23 @@ static void bv_clear_auth(){bv_phase=0;bv_slot=-1;bv_candidate.reset();bv_transc
 static void bv_fail(const char*status){bv_clear_auth();host_disconnect();set_status(status);}
 static void poll_ble_session(){
  BvLink link;ble_voice_link(&link);
- if(!link.ready||bv_epoch!=link.epoch){
+ // A changed epoch means the BLE session really restarted (new connection or a
+ // hard reset) and the authenticated session is invalid. A literal readiness
+ // blip must not tear the session down: hold the state briefly and only give up
+ // if the data path stays down.
+ static uint32_t bv_down_since=0;
+ bool epoch_changed=(bv_epoch!=link.epoch);
+ if(!link.ready&&!epoch_changed){if(!bv_down_since)bv_down_since=millis();}
+ else bv_down_since=0;
+ bool sustained=!link.ready&&bv_down_since&&(millis()-bv_down_since)>1500;
+ if(epoch_changed||sustained){
   if(s_connected){s_connected=s_ready=false;s_ts.hello_done=false;post_event(VOICE_EV_TRANSPORT_LOST);}
   bv_clear_auth();bv_epoch=link.epoch;
  }
- if(!link.ready){set_status("CONNECT_BLUETOOTH");return;}
+ if(!link.ready){
+  if(s_connected&&!sustained&&!epoch_changed)return; /* transient flap: keep READY */
+  set_status("CONNECT_BLUETOOTH");return;
+ }
  if(s_paused){set_status("PAUSED");return;}
  if(bv_phase&&bv_phase<3&&(int32_t)(millis()-bv_deadline)>=0){bv_fail("BLE_AUTH_TIMEOUT");return;}
  // Owned only by the transport task; auth and nested reply writes must not stack 2KB buffers.

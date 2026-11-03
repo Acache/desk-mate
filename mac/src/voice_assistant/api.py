@@ -95,7 +95,8 @@ class AppState:
         self.stt = stt
         self.decision = decision
         self.registry = registry
-        self.enabled_actions: tuple[str, ...] = contracts.R1_ACTIONS
+        self.enabled_actions: tuple[str, ...] = contracts.ENABLED_ACTIONS
+        self.early_stt: dict[str, object] = {}
         self.manager = ConnectionManager()
         self.tasks: set[asyncio.Task] = set()
         from .personalization import Personalizer
@@ -103,7 +104,7 @@ class AppState:
         self.pipeline = Pipeline(PipelineContext(
             cfg=cfg, db=db, service=service, stt=stt, decision=decision,
             executor=None, enabled_actions=self.enabled_actions,
-            personalizer=self.personalizer,
+            personalizer=self.personalizer, early_stt=self.early_stt,
         ))
         from .executor import Executor
         self.pipeline.ctx.executor = Executor(db, registry)
@@ -290,6 +291,14 @@ def run_server(cfg: AppConfig | None = None, *, ble_address: str | None = None) 
     app = create_app(cfg, ble_address=ble_address)
     if cfg.server is None:
         raise SystemExit("server identity missing")
+    # uvicorn configures only its own loggers; without this the bridge's INFO
+    # lines (authentication, session lifecycle) never reach the terminal and
+    # only warnings are visible.
+    logging.basicConfig(
+        level=logging.WARNING,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    logging.getLogger("voice_assistant").setLevel(logging.INFO)
     uvicorn.run(
         app,
         host="0.0.0.0",

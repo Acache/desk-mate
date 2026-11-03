@@ -9,7 +9,9 @@
 
 import AppKit
 import ApplicationServices
+import CoreGraphics
 import Foundation
+import Vision
 
 let BILI_BUNDLE = "com.bilibili.bilibiliPC"
 
@@ -20,6 +22,8 @@ struct Node {
     var desc: String = ""
     var value: String = ""
     var identifier: String = ""
+    var domid: String = ""
+    var classes: [String] = []
     var url: String = ""
     var enabled: Bool = false
     var actions: [String] = []
@@ -90,6 +94,8 @@ func walk(_ element: AXUIElement, depth: Int, maxDepth: Int, budget: inout Int) 
     n.desc = strAttr(element, kAXDescriptionAttribute)
     n.value = strAttr(element, kAXValueAttribute)
     n.identifier = strAttr(element, kAXIdentifierAttribute)
+    n.domid = strAttr(element, "AXDOMIdentifier")
+    n.classes = (attr(element, "AXDOMClassList") as? [String]) ?? []
     n.url = strAttr(element, "AXURL")
     n.enabled = boolAttr(element, kAXEnabledAttribute)
     n.actions = actions(element)
@@ -109,6 +115,7 @@ func jsonObject(_ node: Node) -> [String: Any] {
         "role": node.role, "subrole": node.subrole, "title": node.title,
         "desc": node.desc, "value": node.value, "identifier": node.identifier,
         "url": node.url, "enabled": node.enabled, "actions": node.actions,
+        "domid": node.domid, "classes": node.classes,
         "x": node.x, "y": node.y, "w": node.w, "h": node.h,
         "children": node.children.map(jsonObject),
     ]
@@ -186,18 +193,42 @@ func findElements(_ root: AXUIElement, predicate: (Node) -> Bool, maxDepth: Int 
     return result
 }
 
-func focusedTextField(_ root: AXUIElement) -> AXUIElement? {
+func pageURL(_ root: AXUIElement) -> String {
+    for e in findElements(root, predicate: { $0.role == "AXWebArea" }, maxDepth: 8, limit: 4) {
+        let u = strAttr(e, "AXURL")
+        if !u.isEmpty { return u }
+    }
+    return ""
+}
+
+func searchTextField(_ root: AXUIElement) -> AXUIElement? {
     let candidates = findElements(root, predicate: { n in
         ["AXTextField", "AXTextArea", "AXSearchField"].contains(n.role)
     }, maxDepth: 14, limit: 50)
     if candidates.isEmpty { return nil }
-    // Prefer one whose title/placeholder/description mentions search.
     for e in candidates {
         let hay = (strAttr(e, kAXTitleAttribute) + strAttr(e, kAXDescriptionAttribute)
-                   + strAttr(e, kAXPlaceholderValueAttribute)).lowercased()
+                   + strAttr(e, kAXPlaceholderValueAttribute) + strAttr(e, kAXIdentifierAttribute)).lowercased()
         if hay.contains("搜索") || hay.contains("search") || hay.contains("搜") { return e }
     }
-    return candidates.first
+    // The player page exposes the comment box as its only text field. Never
+    // type there: report "no search box" so the adapter returns home first.
+    let url = pageURL(root)
+    if url.contains("player.html") || url.contains("/video/") { return nil }
+    // On the home/search page the search box is the visible header field
+    // (the other candidate is a 1x0 hidden input).
+    for e in candidates {
+        let box = sizeAttr(e, kAXSizeAttribute)
+        if box.0 > 40 && box.1 > 8 { return e }
+    }
+    return nil
+}
+
+func focusedTextField(_ root: AXUIElement) -> AXUIElement? {
+    // set-text intentionally targets whatever single field the caller focused.
+    findElements(root, predicate: { n in
+        ["AXTextField", "AXTextArea", "AXSearchField"].contains(n.role)
+    }, maxDepth: 14, limit: 50).first
 }
 
 func setText(_ element: AXUIElement, _ text: String) -> Bool {
@@ -225,6 +256,58 @@ func sendKey(_ code: CGKeyCode, flags: CGEventFlags = []) {
     down?.post(tap: .cghidEventTap)
     usleep(30_000)
     up?.post(tap: .cghidEventTap)
+}
+
+func typeText(_ text: String) {
+    let source = CGEventSource(stateID: .hidSystemState)
+    for ch in text {
+        var utf16 = Array(String(ch).utf16)
+        let down = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true)
+        down?.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: &utf16)
+        down?.post(tap: .cghidEventTap)
+        usleep(15_000)
+        let up = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false)
+        up?.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: &utf16)
+        up?.post(tap: .cghidEventTap)
+        usleep(22_000)
+    }
+}
+
+// Vision OCR for CEF-rendered text that never reaches the Accessibility tree
+// (favourite folder names, danmaku input, volume label, ...).
+func ocrText(x: Double, y: Double, w: Double, h: Double) -> [[String: Any]] {
+    guard w > 0, h > 0 else { return [] }
+    let path = NSTemporaryDirectory() + "ax_ocr_\(getpid()).png"
+    let proc = Process()
+    proc.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+    proc.arguments = ["-x", "-R", "\(Int(x)),\(Int(y)),\(Int(w)),\(Int(h))", path]
+    try? proc.run()
+    proc.waitUntilExit()
+    defer { try? FileManager.default.removeItem(atPath: path) }
+    guard let image = NSImage(contentsOfFile: path),
+          let tiff = image.tiffRepresentation,
+          let rep = NSBitmapImageRep(data: tiff),
+          let cg = rep.cgImage else { return [] }
+    let request = VNRecognizeTextRequest()
+    request.recognitionLevel = .accurate
+    request.recognitionLanguages = ["zh-Hans", "en-US"]
+    request.usesLanguageCorrection = true
+    let handler = VNImageRequestHandler(cgImage: cg, options: [:])
+    try? handler.perform([request])
+    var rows: [[String: Any]] = []
+    for observation in request.results ?? [] {
+        guard let candidate = observation.topCandidates(1).first else { continue }
+        let bb = observation.boundingBox
+        rows.append([
+            "text": candidate.string,
+            "x": x + Double(bb.minX) * w,
+            "y": y + (1 - Double(bb.maxY)) * h,
+            "w": Double(bb.width) * w,
+            "h": Double(bb.height) * h,
+            "confidence": candidate.confidence,
+        ])
+    }
+    return rows
 }
 
 func findPlayerButton(_ root: AXUIElement, wantPause: Bool) -> AXUIElement? {
@@ -289,6 +372,9 @@ func main() {
     }
     activate(app)
     let axApp = AXUIElementCreateApplication(app.processIdentifier)
+    // A busy CEF renderer can block AX replies for tens of seconds. Fail fast
+    // instead so a voice command never hangs on a stalled accessibility call.
+    AXUIElementSetMessagingTimeout(axApp, 2.0)
     // Chromium enables its accessibility tree when an assistive client marks
     // the application. The set may return -25208 while still arming it, so
     // treat it as a hint and then give the renderer time to publish the tree.
@@ -305,7 +391,7 @@ func main() {
               "tree": jsonObject(node)])
     case "search":
         guard args.count >= 3 else { emit(["ok": false, "error": "missing query"]); exit(2) }
-        guard let field = focusedTextField(root) else {
+        guard let field = searchTextField(root) else {
             emit(["ok": false, "error": "search_field_not_found"])
             exit(5)
         }
@@ -393,6 +479,7 @@ func main() {
               "x": rx, "y": ry, "w": rw, "h": rh])
     case "set-window":
         var sx = 0.0, sy = 33.0, sw = 1470.0, sh = 900.0
+        var nameFilter = ""
         var q = 2
         while q + 1 < args.count {
             switch args[q] {
@@ -400,15 +487,24 @@ func main() {
             case "--y": sy = Double(args[q + 1]) ?? sy; q += 2
             case "--w": sw = Double(args[q + 1]) ?? sw; q += 2
             case "--h": sh = Double(args[q + 1]) ?? sh; q += 2
+            case "--name": nameFilter = args[q + 1]; q += 2
             default: q += 1
+            }
+        }
+        var target = root
+        if !nameFilter.isEmpty {
+            let wins = (attr(axApp, kAXWindowsAttribute) as? [AXUIElement]) ?? []
+            if let match = wins.first(where: { strAttr($0, kAXTitleAttribute).contains(nameFilter) }) {
+                target = match
             }
         }
         var pos = CGPoint(x: sx, y: sy)
         var size = CGSize(width: sw, height: sh)
         let pv = AXValueCreate(.cgPoint, &pos)
         let sv = AXValueCreate(.cgSize, &size)
-        let e1 = AXUIElementSetAttributeValue(root, kAXPositionAttribute as CFString, pv!)
-        let e2 = AXUIElementSetAttributeValue(root, kAXSizeAttribute as CFString, sv!)
+        _ = AXUIElementPerformAction(target, kAXRaiseAction as CFString)
+        let e1 = AXUIElementSetAttributeValue(target, kAXPositionAttribute as CFString, pv!)
+        let e2 = AXUIElementSetAttributeValue(target, kAXSizeAttribute as CFString, sv!)
         usleep(300_000)
         emit(["ok": e1 == .success && e2 == .success, "position": e1.rawValue, "size": e2.rawValue,
               "x": sx, "y": sy, "w": sw, "h": sh])
@@ -742,7 +838,7 @@ func main() {
             }
         }
         guard !query.isEmpty else { emit(["ok": false, "error": "missing query"]); exit(2) }
-        guard let field = focusedTextField(root) else {
+        guard let field = searchTextField(root) else {
             emit(["ok": false, "error": "search_field_not_found"]); exit(5)
         }
         _ = setText(field, query)
@@ -772,6 +868,33 @@ func main() {
         let pressed = press(chosen.2)
         emit(["ok": pressed, "index": idx, "count": scored.count,
               "title": String(chosen.3.prefix(120)), "query": query])
+    case "press-dom":
+        // --id <substring> [--role AXButton] : press a Chromium element by DOM id/class.
+        var domNeedle = ""
+        var domRole = ""
+        var z = 2
+        while z + 1 < args.count {
+            switch args[z] {
+            case "--id": domNeedle = args[z + 1]; z += 2
+            case "--role": domRole = args[z + 1]; z += 2
+            default: z += 1
+            }
+        }
+        guard !domNeedle.isEmpty else { emit(["ok": false, "error": "missing id"]); exit(2) }
+        let needle = domNeedle.lowercased()
+        let matches = findElements(root, predicate: { n in
+            if !domRole.isEmpty && n.role != domRole { return false }
+            let hay = (n.domid + " " + n.classes.joined(separator: " ")).lowercased()
+            return !hay.isEmpty && hay.contains(needle)
+        }, maxDepth: 12, limit: 10)
+        guard let element = matches.first else {
+            emit(["ok": false, "error": "dom_element_not_found", "id": domNeedle]); exit(5)
+        }
+        let ok = press(element)
+        let (ex, ey) = pointAttr(element, kAXPositionAttribute)
+        let (ew, eh) = sizeAttr(element, kAXSizeAttribute)
+        emit(["ok": ok, "pressed": ok, "role": strAttr(element, kAXRoleAttribute),
+              "domid": strAttr(element, "AXDOMIdentifier"), "x": ex, "y": ey, "w": ew, "h": eh])
     case "press":
         // press --title <substring> [--role R] [--index N]
         var title = ""
@@ -796,16 +919,56 @@ func main() {
             emit(["ok": false, "error": "element_not_found_or_not_pressable", "count": found.count])
             exit(6)
         }
+    case "type":
+        guard args.count >= 3 else { emit(["ok": false, "error": "missing text"]); exit(2) }
+        typeText(args[2])
+        emit(["ok": true, "text": args[2]])
+    case "ocr":
+        var ox = 0.0, oy = 0.0, ow = 0.0, oh = 0.0
+        var q = 2
+        while q + 1 < args.count {
+            switch args[q] {
+            case "--x": ox = Double(args[q + 1]) ?? 0
+            case "--y": oy = Double(args[q + 1]) ?? 0
+            case "--w": ow = Double(args[q + 1]) ?? 0
+            case "--h": oh = Double(args[q + 1]) ?? 0
+            default: break
+            }
+            q += 2
+        }
+        emit(["ok": true, "rows": ocrText(x: ox, y: oy, w: ow, h: oh)])
     case "set-text":
         guard args.count >= 3 else { emit(["ok": false, "error": "missing text"]); exit(2) }
         guard let field = focusedTextField(root) else {
             emit(["ok": false, "error": "text_field_not_found"]); exit(5)
         }
         emit(["ok": setText(field, args[2]), "value": strAttr(field, kAXValueAttribute)])
+    case "keyseq":
+        // --key right --count 12 : one process, N key presses (seek arrowing).
+        var seqKey = "right"
+        var seqCount = 1
+        var z = 2
+        while z + 1 < args.count {
+            switch args[z] {
+            case "--key": seqKey = args[z + 1]; z += 2
+            case "--count": seqCount = Int(args[z + 1]) ?? 1; z += 2
+            default: z += 1
+            }
+            }
+        let codes: [String: CGKeyCode] = ["space": 49, "return": 36, "escape": 53, "left": 123, "right": 124, "q": 12, "w": 13, "e": 14, "d": 2, "f": 3, "m": 46, "n": 45, "p": 35, "leftbracket": 33, "rightbracket": 30]
+        guard let seqCode = codes[seqKey.lowercased()] else {
+            emit(["ok": false, "error": "unsupported_key"]); exit(2)
+        }
+        let total = max(1, min(60, seqCount))
+        for _ in 0..<total {
+            sendKey(seqCode)
+            usleep(70_000)
+        }
+        emit(["ok": true, "key": seqKey, "count": total])
     case "key":
         guard args.count >= 3 else { emit(["ok": false, "error": "missing key"]); exit(2) }
         let key = args[2].lowercased()
-        let codes: [String: CGKeyCode] = ["space": 49, "return": 36, "escape": 53, "left": 123, "right": 124]
+        let codes: [String: CGKeyCode] = ["space": 49, "return": 36, "escape": 53, "left": 123, "right": 124, "q": 12, "w": 13, "e": 14, "d": 2, "f": 3, "m": 46, "n": 45, "p": 35, "leftbracket": 33, "rightbracket": 30]
         if let code = codes[key] { sendKey(code); emit(["ok": true, "key": key]) }
         else { emit(["ok": false, "error": "unsupported_key"]); exit(2) }
     case "activate":

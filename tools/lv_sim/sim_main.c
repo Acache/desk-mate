@@ -224,6 +224,55 @@ static void sim_host_setup(void){
  for(int i=0;i<5;i++){sim_hosts.catalog.hosts[i].present=true;snprintf(sim_hosts.catalog.hosts[i].id,37,"server-%d",i);snprintf(sim_hosts.catalog.hosts[i].name,VH_NAME_BYTES,"%s",names[i]);}
  sim_hosts.catalog.revision=1;vh_read=sim_host_read;vh_submit=sim_host_submit;vh_gate=sim_host_gate;
 }
+static void expect_bili(const char *state_text,const char *hint,const char *result){
+    focus_bili_refresh();
+    if(state_text)assert(!strcmp(lv_label_get_text(focus_bili_state),state_text));
+    if(hint)assert(!strcmp(lv_label_get_text(focus_bili_hint),hint));
+    if(result&&strcmp(lv_label_get_text(focus_bili_result),result)){printf("voice page mismatch: state=%d expected=[%s] got=[%s] state_text=[%s]\n",sim_bili.state,result,lv_label_get_text(focus_bili_result),lv_label_get_text(focus_bili_state));assert(0);}
+}
+/* Every screen-3 state the firmware can show, frame by frame. */
+static void voice_page_state_tests(void){
+ focus_go_page(PAGE_BILI,false);advance(150);sim_host_setup();
+ sim_bili=(FocusBiliStatus){0};
+ sim_bili.state=0;expect_bili("OFFLINE","VOICE SERVICE OFFLINE\nOLD PAGES STILL WORK",NULL);
+ sim_bili.state=1;expect_bili("CONNECTING","LOOKING FOR THE MAC",NULL);
+ sim_bili.state=2;sim_bili.ready=1;expect_bili("Ready to talk","HOLD KEY / RELEASE TO SEND",NULL);
+ assert(!strcmp(lv_label_get_text(focus_bili_timer),"Talk"));
+ assert(!strcmp(lv_label_get_text(focus_bili_footer),"BOOT x2 REPLAY"));
+ sim_bili.state=3;expect_bili("LISTEN","HOLD THE KEY",NULL);
+ assert(!strcmp(lv_label_get_text(focus_bili_timer),"--"));
+ sim_bili.state=4;sim_bili.recording_ms=3000;expect_bili("LISTENING","RELEASE KEY TO SEND",NULL);
+ assert(!strcmp(lv_label_get_text(focus_bili_timer),"00:03"));
+ sim_bili.state=5;sim_bili.cancel_remaining_ms=700;expect_bili("Ready to send","PRESS KEY AGAIN TO CANCEL",NULL);
+ assert(!strcmp(lv_label_get_text(focus_bili_timer),"0.7s"));
+ sim_bili.state=6;expect_bili("SENDING","MAC IS THINKING",NULL);
+ assert(!strcmp(lv_label_get_text(focus_bili_timer),"--"));
+ sim_bili.state=7;expect_bili("THINKING","MAC IS WORKING",NULL);
+ strcpy(sim_bili.stage,"transcribing");expect_bili("TRANSCRIBE","MAC IS WORKING",NULL);
+ strcpy(sim_bili.stage,"planning");expect_bili("PLANNING","MAC IS WORKING",NULL);
+ strcpy(sim_bili.stage,"executing");expect_bili("EXECUTING","MAC IS WORKING",NULL);
+ sim_bili.stage[0]=0;
+ sim_bili.state=8;expect_bili("CHECKING","ASKING THE MAC",NULL);
+ assert(!strcmp(lv_label_get_text(focus_bili_timer),"--"));
+ sim_bili.state=9;sim_bili.result=1;expect_bili("DONE","RESULT","DONE");
+ sim_bili.result=2;expect_bili("PARTIAL","RESULT","PARTIAL");
+ sim_bili.result=3;sim_bili.summary[0]=0;expect_bili("FAILED","RESULT","");
+ strcpy(sim_bili.summary,"NOT A BILIBILI COMMAND");expect_bili("FAILED","RESULT","NOT A BILIBILI COMMAND");
+ strcpy(sim_bili.summary,"SEARCH FIRST");expect_bili("FAILED","RESULT","SEARCH FIRST");
+ /* Legacy host fallback still maps Chinese summaries instead of drawing boxes. */
+ snprintf(sim_bili.summary,sizeof(sim_bili.summary),"%s","没有识别到 B 站指令，请说打开B站、搜索、播放、暂停或继续");
+ expect_bili("FAILED","RESULT","SEARCH EXPIRED / SEARCH AGAIN");
+ snprintf(sim_bili.summary,sizeof(sim_bili.summary),"%s","没有检测到语音，请重新说");
+ expect_bili("FAILED","RESULT","NO SPEECH / TRY AGAIN");
+ sim_bili.summary[0]=0;sim_bili.result=4;expect_bili("CANCELED","RESULT","CANCELED");
+ sim_bili.result=5;expect_bili("UNKNOWN","RESULT","UNKNOWN / CHECK MAC");
+ sim_bili.result=0;sim_bili.state=10;expect_bili("RELEASE","RELEASE THE KEY",NULL);
+ sim_bili.state=11;expect_bili("REPLAY","B AGAIN TO CONFIRM",NULL);
+ sim_bili.state=12;expect_bili("REPLAY","B AGAIN TO CONFIRM",NULL);
+ sim_bili.state=13;expect_bili("UNKNOWN","CHECK MAC\nKEY OR B: OK",NULL);
+ sim_bili.state=2;sim_bili.result=0;advance(100);
+ puts("voice page: all 14 states and label/timer assertions PASS");
+}
 static void voice_host_ui_tests(void){
  focus_go_page(PAGE_BILI,false);advance(150);sim_host_setup();
  sim_bili=(FocusBiliStatus){0};sim_bili.state=9;sim_bili.result=1;
@@ -280,7 +329,7 @@ static void feedback_tests(void) {
     puts("feedback: overlay state-machine tests start");
     focus_ui_set_feedback_sink(sim_feedback);
     focus_go_page(PAGE_BILI, false); advance(200);
-    focus_feedback_show("11111111-1111-4111-8111-111111111111");
+    focus_feedback_show("11111111-1111-4111-8111-111111111111", "DONE");
     assert(!lv_obj_has_flag(focus_feedback_overlay, LV_OBJ_FLAG_HIDDEN));
     assert(strcmp(lv_label_get_text(focus_feedback_count), "5s") == 0);
     BT_SEND_EVENT(focus_feedback_overlay, LV_EVENT_PRESSED, NULL);
@@ -294,7 +343,7 @@ static void feedback_tests(void) {
     assert(strcmp(fb_last_rating, "unfeedback") == 0);
     assert(fb_count == 1);
 
-    focus_feedback_show("22222222-2222-4222-8222-222222222222");
+    focus_feedback_show("22222222-2222-4222-8222-222222222222", "DONE");
     focus_feedback_select(true);
     assert(strcmp(fb_last_rating, "good") == 0);
     advance(2100);
@@ -303,7 +352,7 @@ static void feedback_tests(void) {
     /* Even after GOOD/BAD, a 30 s review badge remains. */
     assert(!lv_obj_has_flag(focus_feedback_badge, LV_OBJ_FLAG_HIDDEN));
 
-    focus_feedback_show("33333333-3333-4333-8333-333333333333");
+    focus_feedback_show("33333333-3333-4333-8333-333333333333", "DONE");
     focus_feedback_hide("unfeedback", "next_ptt");
     assert(lv_obj_has_flag(focus_feedback_overlay, LV_OBJ_FLAG_HIDDEN));
     assert(!lv_obj_has_flag(focus_feedback_badge, LV_OBJ_FLAG_HIDDEN));
@@ -313,7 +362,7 @@ static void feedback_tests(void) {
     focus_feedback_hide("unfeedback", "timeout");
     assert(fb_count == 4);
 
-    focus_feedback_show("33333333-3333-4333-8333-333333333333");
+    focus_feedback_show("33333333-3333-4333-8333-333333333333", "DONE");
     for (int i = 0; i < 3; ++i) {
         BT_SEND_EVENT(focus_feedback_overlay, LV_EVENT_PRESSED, NULL);
         BT_SEND_EVENT(focus_feedback_overlay, LV_EVENT_RELEASED, NULL);
@@ -567,7 +616,7 @@ int main(int argc, char **argv) {
     assert(memory.total_size - memory.free_size < 48u * 1024u);
 #endif
     assert(strcmp(lv_label_get_text(focus_battery), "85%") == 0);
-    if (test) { run_tests(); feedback_tests(); power_tests(); bluetooth_tests(); voice_host_ui_tests(); return 0; }
+    if (test) { run_tests(); feedback_tests(); power_tests(); bluetooth_tests(); voice_host_ui_tests(); voice_page_state_tests(); return 0; }
     if (capture) {
         int page = argc > 2 ? atoi(argv[2]) : 0;
         if (argc > 4 && strcmp(argv[4], "connected") == 0) {
@@ -575,7 +624,7 @@ int main(int argc, char **argv) {
         }
         focus_go_page(page, false); advance(300);
         if (page == PAGE_BILI && !(argc>4&&!strncmp(argv[4],"voice",5))) {
-            focus_feedback_show("44444444-4444-4444-8444-444444444444");
+            focus_feedback_show("44444444-4444-4444-8444-444444444444", "DONE");
             advance(100);
         }
         if (argc > 4 && !strncmp(argv[4], "bluetooth", 9)) {

@@ -30,6 +30,7 @@ typedef struct {
     float rms;
     char summary[129];
     char transport[64];
+    char stage[16];
     char command_id[37];
 } FocusBiliStatus;
 typedef void (*FocusReadBili)(FocusBiliStatus *out);
@@ -55,13 +56,14 @@ static void focus_voice_visibility(bool open);
 #define FOCUS_WAVE_BARS 21
 static lv_obj_t *focus_bili_wave[FOCUS_WAVE_BARS];
 static lv_obj_t *focus_bili_result, *focus_bili_mac, *focus_bili_dot;
-static lv_obj_t *focus_feedback_overlay, *focus_feedback_count, *focus_feedback_title;
+static lv_obj_t *focus_feedback_overlay, *focus_feedback_count, *focus_feedback_title, *focus_feedback_detail;
 static lv_obj_t *focus_feedback_good, *focus_feedback_bad, *focus_feedback_badge;
 static bool focus_feedback_visible, focus_feedback_selected, focus_feedback_held;
 static uint32_t focus_feedback_deadline, focus_feedback_badge_until;
 static uint32_t focus_feedback_result_tick;
 static uint8_t focus_feedback_touches;
 static char focus_feedback_command[37], focus_feedback_last_command[37];
+static char focus_feedback_detail_text[41];
 typedef void (*FocusFeedbackSink)(const char *, const char *, const char *, int, int);
 static FocusFeedbackSink focus_feedback_sink;
 static int focus_page;
@@ -80,7 +82,7 @@ static lv_point_t focus_wheel_start;
 
 static void focus_refresh(void);
 static void focus_action(int action);
-static void focus_feedback_show(const char *command_id);
+static void focus_feedback_show(const char *command_id, const char *detail);
 static void focus_feedback_hide(const char *rating, const char *dismissed_by);
 static void focus_feedback_tick(void);
 static void focus_feedback_content_build(void);
@@ -302,6 +304,7 @@ static void focus_feedback_hide(const char *rating, const char *dismissed_by) {
         lv_obj_add_flag(focus_feedback_overlay, LV_OBJ_FLAG_HIDDEN);
         lv_obj_clean(focus_feedback_overlay);
         focus_feedback_title=focus_feedback_count=focus_feedback_good=focus_feedback_bad=NULL;
+        focus_feedback_detail=NULL;
     }
 }
 static void focus_feedback_update(void) {
@@ -346,7 +349,7 @@ static void focus_feedback_tick(void) {
     }
     focus_feedback_update();
 }
-static void focus_feedback_show(const char *command_id) {
+static void focus_feedback_show(const char *command_id, const char *detail) {
     if (!focus_feedback_overlay || !command_id || !command_id[0]) return;
     if (focus_feedback_visible) focus_feedback_hide("unfeedback", "replaced");
     if (!focus_feedback_title) focus_feedback_content_build();
@@ -363,6 +366,9 @@ static void focus_feedback_show(const char *command_id) {
     focus_feedback_visible = true;
     focus_feedback_deadline = lv_tick_get() + 5000;
     lv_label_set_text(focus_feedback_title, "WAS THIS CORRECT?");
+    snprintf(focus_feedback_detail_text, sizeof(focus_feedback_detail_text), "%s",
+             detail ? detail : "");
+    if (focus_feedback_detail) lv_label_set_text(focus_feedback_detail, focus_feedback_detail_text);
     lv_label_set_text(focus_feedback_count, "5s");
     lv_obj_clear_state(focus_feedback_good, LV_STATE_CHECKED | LV_STATE_DISABLED);
     lv_obj_clear_state(focus_feedback_bad, LV_STATE_CHECKED | LV_STATE_DISABLED);
@@ -404,12 +410,16 @@ static void focus_feedback_overlay_event(lv_event_t *e) {
 static void focus_feedback_badge_event(lv_event_t *e) {
     if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
     if (focus_feedback_last_command[0] && !focus_feedback_visible)
-        focus_feedback_show(focus_feedback_last_command);
+        focus_feedback_show(focus_feedback_last_command, focus_feedback_detail_text);
 }
 static void focus_feedback_content_build(void) {
     focus_feedback_title = focus_label(focus_feedback_overlay, "WAS THIS CORRECT?", 112,
                                        &lv_font_montserrat_24, FOCUS_INK);
     lv_obj_set_width(focus_feedback_title, 420); lv_obj_set_x(focus_feedback_title, 30);
+    focus_feedback_detail = focus_label(focus_feedback_overlay, "", 158,
+                                        &lv_font_montserrat_20, FOCUS_MUTED);
+    lv_obj_set_width(focus_feedback_detail, 420); lv_obj_set_x(focus_feedback_detail, 30);
+    lv_label_set_long_mode(focus_feedback_detail, LV_LABEL_LONG_DOT);
     focus_feedback_count = focus_label(focus_feedback_overlay, "5s", 24,
                                        &lv_font_montserrat_24, FOCUS_AMBER);
     lv_obj_set_width(focus_feedback_count, 80); lv_obj_set_x(focus_feedback_count, 380);
@@ -508,6 +518,43 @@ static void focus_bili_wave_update(const FocusBiliStatus *st) {
     }
 }
 
+static const char *focus_bili_detail(const FocusBiliStatus *st) {
+    const char *detail = "";
+    if (st->result == 1) {
+        if (strstr(st->summary, "ALREADY PLAYING")) detail = "ALREADY PLAYING";
+        else if (strstr(st->summary, "ALREADY PAUSED")) detail = "ALREADY PAUSED";
+        else detail = "DONE";
+    }
+    else if (st->result == 2) detail = "PARTIAL";
+    else if (st->result == 4) detail = "CANCELED";
+    else if (st->result == 5) detail = "UNKNOWN / CHECK MAC";
+    else if (st->summary[0]) {
+        // Current hosts send a short ASCII label in `detail` (stored as the
+        // summary); show it verbatim. Only older hosts send Chinese text, which
+        // Montserrat cannot render, so fall back to keyword mapping.
+        bool summary_ascii = true;
+        for (const unsigned char *c = (const unsigned char *)st->summary; *c; ++c)
+            if (*c >= 128) { summary_ascii = false; break; }
+        if (summary_ascii) {
+            detail = st->summary;
+        } else if (strstr(st->summary, "播放器") || strstr(st->summary, "播放视频"))
+            detail = "NO PLAYER / PLAY A VIDEO";
+        else if (strstr(st->summary, "语音") || strstr(st->summary, "听"))
+            detail = "NO SPEECH / TRY AGAIN";
+        else if (strstr(st->summary, "搜索") || strstr(st->summary, "过期"))
+            detail = "SEARCH EXPIRED / SEARCH AGAIN";
+        else if (strstr(st->summary, "未知") || strstr(st->summary, "检查"))
+            detail = "UNKNOWN / CHECK MAC";
+        else if (strstr(st->summary, "收藏") || strstr(st->summary, "点赞") || strstr(st->summary, "弹幕") || strstr(st->summary, "R2"))
+            detail = "UNSUPPORTED / R1";
+        else if (strstr(st->summary, "取消"))
+            detail = "CANCELED";
+        else
+            detail = "FAILED / SEE MAC";
+    }
+    return detail;
+}
+
 static void focus_bili_refresh(void) {
     if (!focus_read_bili || !focus_bili_state) return;
     FocusBiliStatus st;
@@ -537,7 +584,7 @@ static void focus_bili_refresh(void) {
             snprintf(focus_feedback_origin,37,"%s",i>=0&&i<VH_CAPACITY?v.catalog.hosts[i].id:"");}
         snprintf(focus_feedback_last_command, sizeof(focus_feedback_last_command), "%s", st.command_id);
         focus_feedback_result_tick = lv_tick_get();
-        if (focus_page == PAGE_BILI) focus_feedback_show(st.command_id);
+        if (focus_page == PAGE_BILI) focus_feedback_show(st.command_id, focus_bili_detail(&st));
         else focus_feedback_badge_show();
     }
     focus_bili_wave_update(&st);
@@ -551,7 +598,13 @@ static void focus_bili_refresh(void) {
     case 4: state_text = "LISTENING"; hint = "RELEASE KEY TO SEND"; break;
     case 5: state_text = "Ready to send"; hint = "PRESS KEY AGAIN TO CANCEL"; break;
     case 6: state_text = "SENDING"; hint = "MAC IS THINKING"; break;
-    case 7: state_text = "THINKING"; hint = "MAC IS WORKING"; break;
+    case 7:
+        state_text = "THINKING";
+        if (!strcmp(st.stage, "transcribing")) state_text = "TRANSCRIBE";
+        else if (!strcmp(st.stage, "planning")) state_text = "PLANNING";
+        else if (!strcmp(st.stage, "executing")) state_text = "EXECUTING";
+        hint = "MAC IS WORKING";
+        break;
     case 8: state_text = "CHECKING"; hint = "ASKING THE MAC"; break;
     case 9:
         state_text = st.result == 1 ? "DONE" : st.result == 2 ? "PARTIAL" :
@@ -588,36 +641,8 @@ static void focus_bili_refresh(void) {
     lv_label_set_text(focus_bili_state, state_text);
     lv_label_set_text(focus_bili_timer, timer);
     lv_label_set_text(focus_bili_hint, hint);
-    if(focus_bili_footer)lv_label_set_text(focus_bili_footer,st.state>=3&&st.state<=8?"TARGET LOCKED / PWR CANCEL":"BOOT REPLAY / PWR BACK");
-    const char *detail = "";
-    if (st.result == 1) {
-        if (strstr(st.summary, "ALREADY PLAYING")) detail = "ALREADY PLAYING";
-        else if (strstr(st.summary, "ALREADY PAUSED")) detail = "ALREADY PAUSED";
-        else detail = "DONE";
-    }
-    else if (st.result == 2) detail = "PARTIAL";
-    else if (st.result == 4) detail = "CANCELED";
-    else if (st.result == 5) detail = "UNKNOWN / CHECK MAC";
-    else if (st.summary[0]) {
-        // Server summaries are Chinese; Montserrat has no CJK glyphs. Map the
-        // common reasons to meaningful ASCII instead of rendering boxes.
-        if (strstr(st.summary, "播放器") || strstr(st.summary, "播放视频"))
-            detail = "NO PLAYER / PLAY A VIDEO";
-        else if (strstr(st.summary, "语音") || strstr(st.summary, "听"))
-            detail = "NO SPEECH / TRY AGAIN";
-        else if (strstr(st.summary, "搜索") || strstr(st.summary, "过期"))
-            detail = "SEARCH EXPIRED / SEARCH AGAIN";
-        else if (strstr(st.summary, "未知") || strstr(st.summary, "检查"))
-            detail = "UNKNOWN / CHECK MAC";
-        else if (strstr(st.summary, "收藏") || strstr(st.summary, "点赞") || strstr(st.summary, "弹幕") || strstr(st.summary, "R2"))
-            detail = "UNSUPPORTED / R1";
-        else if (strstr(st.summary, "取消"))
-            detail = "CANCELED";
-        else
-            detail = "FAILED / SEE MAC";
-    } else {
-        detail = "";
-    }
+    if(focus_bili_footer)lv_label_set_text(focus_bili_footer,st.state>=3&&st.state<=8?"TARGET LOCKED / PWR CANCEL":"BOOT x2 REPLAY");
+    const char *detail = focus_bili_detail(&st);
     if(st.state==9&&st.command_id[0]&&strcmp(vh_recent_id,st.command_id)){
         snprintf(vh_recent_id,37,"%s",st.command_id);snprintf(vh_recent_result,sizeof(vh_recent_result),"%s",detail);
         if(vh_read){VoiceHostView v;vh_read(&v);int i=v.catalog.active;if(i>=0&&i<VH_CAPACITY)vh_recent_host=v.catalog.hosts[i];}
@@ -755,7 +780,7 @@ static void focus_voice_build(void) {
     focus_bili_cancel_fill=focus_object(focus_bili_cancel_track,0,0,280,4);lv_obj_set_style_bg_color(focus_bili_cancel_fill,lv_color_hex(FOCUS_AMBER),0);lv_obj_set_style_bg_opa(focus_bili_cancel_fill,LV_OPA_COVER,0);lv_obj_add_flag(focus_bili_cancel_track,LV_OBJ_FLAG_HIDDEN);
     focus_bili_hint=focus_label(p,"CONNECT YOUR COMPUTER",350,&lv_font_montserrat_16,FOCUS_MUTED);
     focus_bili_result=focus_label(p,"",394,&lv_font_montserrat_20,FOCUS_BLUE);lv_label_set_long_mode(focus_bili_result,LV_LABEL_LONG_DOT);lv_obj_add_flag(focus_bili_result,LV_OBJ_FLAG_CLICKABLE);lv_obj_add_event_cb(focus_bili_result,focus_voice_history,LV_EVENT_CLICKED,NULL);
-    focus_bili_footer=focus_label(p,"BOOT REPLAY / PWR BACK",420,&lv_font_montserrat_16,FOCUS_MUTED);
+    focus_bili_footer=focus_label(p,"BOOT x2 REPLAY",420,&lv_font_montserrat_16,FOCUS_MUTED);
 }
 static void focus_voice_visibility(bool open) {
     if(open){

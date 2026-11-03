@@ -11,7 +11,9 @@ from difflib import SequenceMatcher
 
 # An action verb is required. "点击第2个视频" is not an R1 action and must
 # not reach the LLM/executor as a vague play/open request.
-_KEYWORDS = ("打开", "搜索", "搜", "播放", "暂停", "继续", "恢复", "点击", "停")
+_KEYWORDS = ("打开", "搜索", "搜", "播放", "暂停", "继续", "恢复", "点击", "停",
+             "点赞", "投币", "收藏", "弹幕", "评论", "快进", "后退", "回退", "倒退",
+             "音量", "声音", "下一集", "下集", "上一集", "上集", "币")
 _PUNCT = re.compile(r"[\s，。！？、,.!?;；:：\-—_（）()\[\]【】\"'“”‘’]+")
 
 
@@ -50,6 +52,29 @@ def _index_value(token: str) -> int | None:
     return _CHINESE_NUM.get(token)
 
 
+def _cn_number(token: str) -> int | None:
+    if not token:
+        return None
+    if token.isdigit():
+        return int(token)
+    digits = {"零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4,
+              "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+    total = 0
+    current = 0
+    for ch in token:
+        if ch in digits:
+            current = digits[ch]
+        elif ch == "十":
+            total += (current or 1) * 10
+            current = 0
+        elif ch == "百":
+            total += (current or 1) * 100
+            current = 0
+        else:
+            return None
+    return total + current
+
+
 def _ok(actions: list[tuple[str, dict]]) -> "DecisionProposal":
     from .contracts import ActionStep, DecisionProposal, DecisionStatus, ReasonCode
     return DecisionProposal(
@@ -75,11 +100,7 @@ def _out_of_scope(summary: str) -> "DecisionProposal":
 
 
 _UNSUPPORTED_HINTS = {
-    "收藏": "收藏属于 R2 账号动作，当前 R1 未启用",
-    "点赞": "点赞属于 R2 账号动作，当前 R1 未启用",
-    "投币": "投币属于 R2 账号动作，当前 R1 未启用",
-    "关注": "关注属于 R2 账号动作，当前 R1 未启用",
-    "弹幕": "弹幕发送属于 R2 账号动作，当前 R1 未启用",
+    "关注": "关注属于 R2 账号动作，当前未启用",
 }
 
 
@@ -144,6 +165,70 @@ def rule_based_proposal(text: str, context=None) -> "DecisionProposal | None":
     t = re.sub(r"(?:一下|吧|啊|呀|呢|谢谢)$", "", t)
     if ("不要" in t or "别" in t) and any(k in t for k in ("打开", "搜索", "播放", "暂停", "继续", "恢复")):
         return _out_of_scope("已取消，不会执行该动作")
+
+    # --- R2 player controls (deterministic; execution is verified by UI read-back) ---
+    if "点赞" in t or "赞一下" in t or "点个赞" in t or t == "赞":
+        return _ok([("bilibili.like", {}, [])])
+    if "投币" in t or "投个币" in t or ("投" in t and "币" in t):
+        count = 2 if re.search(r"(?:两|2)(?:个|枚)?币?|两个币|两枚", t) else 1
+        return _ok([("bilibili.coin", {"count": count}, [])])
+    if "收藏" in t and "取消收藏" not in t:
+        folder = None
+        fm = re.search(r"收藏(?:到|至|进|在)([^，。,.!！?？]{1,20}?)(?:收藏夹|文件夹|里|中)?$", t)
+        if fm:
+            folder = fm.group(1).strip()
+        return _ok([("bilibili.favorite", {"folder": folder} if folder else {}, [])])
+    if "评论" in t and any(k in t for k in ("关闭", "收起", "关掉", "关")):
+        return _ok([("bilibili.comments", {"open": False}, [])])
+    if "评论" in t and any(k in t for k in ("打开", "开", "看", "展开", "去", "进入")):
+        return _ok([("bilibili.comments", {"open": True}, [])])
+    if "弹幕" in t and any(k in t for k in ("发送", "发", "发个", "发一条", "发条", "写")):
+        text = ""
+        dm = re.search(r"弹幕(?:说|写|内容)?[：:，,]?(.+)$", t)
+        if dm:
+            text = dm.group(1).strip()
+        if not text:
+            dm = re.search(r"(?:发送|发)(?:一条|个|条)?(.+)$", t)
+            if dm:
+                text = dm.group(1).replace("弹幕", "").strip()
+        if text:
+            return _ok([("bilibili.send_danmaku", {"text": text[:30]}, [])])
+        return _clarify("请说要发送的弹幕内容，例如“发送弹幕 好可爱”")
+    if any(k in t for k in ("快进", "后退", "回退", "倒退", "倒回")):
+        mm = re.search(r"到第?([0-9零一二三四五六七八九十百两]+)分([0-9零一二三四五六七八九十百两]+)秒", t)
+        if mm:
+            minutes, seconds = _cn_number(mm.group(1)), _cn_number(mm.group(2))
+            if minutes is not None and seconds is not None:
+                return _ok([("bilibili.seek", {"target_s": minutes * 60 + seconds}, [])])
+        mm = re.search(r"到第?([0-9零一二三四五六七八九十百两]+)(?:分钟|分)", t)
+        if mm and _cn_number(mm.group(1)) is not None:
+            return _ok([("bilibili.seek", {"target_s": _cn_number(mm.group(1)) * 60}, [])])
+        mm = re.search(r"到第?([0-9零一二三四五六七八九十百两]+)秒", t)
+        if mm and _cn_number(mm.group(1)) is not None:
+            return _ok([("bilibili.seek", {"target_s": _cn_number(mm.group(1))}, [])])
+        mm = re.search(r"(?:快进|前进)([0-9零一二三四五六七八九十百两]+)秒", t)
+        if mm and _cn_number(mm.group(1)) is not None:
+            return _ok([("bilibili.seek", {"delta_s": _cn_number(mm.group(1))}, [])])
+        mm = re.search(r"(?:后退|回退|倒退|倒回)([0-9零一二三四五六七八九十百两]+)秒", t)
+        if mm and _cn_number(mm.group(1)) is not None:
+            return _ok([("bilibili.seek", {"delta_s": -_cn_number(mm.group(1))}, [])])
+        return _clarify("请说快进多少秒，或快进到几分几秒")
+    if "下一集" in t or "下集" in t:
+        return _ok([("bilibili.next", {}, [])])
+    if "上一集" in t or "上集" in t:
+        return _ok([("bilibili.prev", {}, [])])
+    if any(k in t for k in ("音量", "声音")):
+        vm = re.search(r"百分之([0-9零一二三四五六七八九十百两]+)", t)
+        if vm and _cn_number(vm.group(1)) is not None:
+            return _ok([("system.volume", {"target": max(0, min(100, _cn_number(vm.group(1))))}, [])])
+        vm = re.search(r"([0-9]+)%", t)
+        if vm:
+            return _ok([("system.volume", {"target": max(0, min(100, int(vm.group(1))))}, [])])
+        if any(k in t for k in ("大", "高", "响")):
+            return _ok([("system.vol_up", {"delta": 5}, [])])
+        if any(k in t for k in ("小", "低", "轻")):
+            return _ok([("system.vol_down", {"delta": 5}, [])])
+        return _clarify("请说调大、调小，或调到百分之多少")
 
     # Accept both natural orders produced by ASR:
     #   第2排第3个视频 / 点击第2排第3个

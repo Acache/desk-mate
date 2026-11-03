@@ -10,6 +10,8 @@ void ble_voice_link(BvLink*);
 bool ble_voice_receive(BvMessage*);
 bool ble_voice_send(uint8_t,const uint8_t*,size_t);
 bool ble_voice_writable();
+uint16_t ble_voice_queue_free();
+void ble_voice_stats(uint32_t *sent, uint32_t *acked);
 void ble_voice_reset();
 
 void ble_voice_enable(bool);

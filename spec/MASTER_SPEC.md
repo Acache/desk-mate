@@ -68,7 +68,7 @@
 
 ### 3.1 传输
 
-2026-11-02 正式加入 BLE 原始 PCM 语音，默认通过与 HID 共用的单连接传输；Wi-Fi/WSS 可手动选择。两条链路复用同一套会话、取消、封存、提交和执行契约；BLE 额外以 USB 凭据派生密钥做双向挑战证明并绑定蓝牙对端身份。详见 [BLE 语音桥接](../docs/BLE_VOICE.md)。原始吞吐依据见 [实验记录](../docs/BLE_VOICE_LAB.md)。
+2026-11-02 正式加入 BLE 语音，默认通过与 HID 共用的单连接传输；BLE 链路用 IMA ADPCM 4:1 压缩（逻辑音频仍为 16kHz/s16，主机解码后落盘与识别），Wi-Fi 保持原始 PCM；Wi-Fi/WSS 可手动选择。两条链路复用同一套会话、取消、封存、提交和执行契约；BLE 额外以 USB 凭据派生密钥做双向挑战证明并绑定蓝牙对端身份。详见 [BLE 语音桥接](../docs/BLE_VOICE.md)。原始吞吐依据见 [实验记录](../docs/BLE_VOICE_LAB.md)。
 
 - **WSS（TLS WebSocket）**，默认端口 **8765**
 - 双向 JSON 消息，**客户端（设备）→ 服务端（主机）** 与 **服务端→客户端** 各自一组类型
@@ -129,7 +129,7 @@ STAGING → SEALED → COMMITTED → TRANSCRIBING → PLANNING
 ## 4. 语音管线
 
 ```
-物理 KEY 按住 → I2S 采集 (16 kHz mono s16) → 有界 PCM 环形缓冲
+物理 KEY 按住 → I2S 采集 (16 kHz mono s16) → 有界 PCM 环形缓冲 → BLE 侧 IMA ADPCM 4:1 编码（640B→164B）
    → BLE 分片或二进制 WS 帧 (WSS) → 共享会话 → SenseVoice STT → 规则 planner → [可选] 本地意图个性化 → [回退] 本地 LLM
    → ValidatedPlan → macOS Accessibility (ax_helper) → Bilibili
    → 结果回传设备；GOOD/BAD 覆盖层喂给个性化闭环
@@ -141,7 +141,7 @@ STAGING → SEALED → COMMITTED → TRANSCRIBING → PLANNING
 |---|---|
 | 模型 | **`iic/SenseVoiceSmall`**（本地）|
 | 进程 | `python -m voice_assistant.stt_worker --model <model>` |
-| 音频格式 | 16 kHz / 单声道 / 16 bit（**严格校验**，不合规 → `AUDIO_INVALID`）|
+| 音频格式 | 逻辑格式 16 kHz / 单声道 / 16 bit（**严格校验**，不合规 → `AUDIO_INVALID`）；BLE 线缆编码为 `codec=ima4`，Wi-Fi 为 `s16le` |
 | 失败策略 | **fail closed** —— 模型/运行时缺失 → `MODEL_UNAVAILABLE`，**绝不回退云服务** |
 
 ### 4.2 决策层（★ 核心）

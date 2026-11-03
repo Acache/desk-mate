@@ -47,6 +47,9 @@ R2_ACTIONS: tuple[str, ...] = (
     "bilibili.prev",
     "bilibili.favorite",
     "bilibili.like",
+    "bilibili.coin",
+    "bilibili.comments",
+    "bilibili.seek",
     "bilibili.history",
     "bilibili.danmaku_on",
     "bilibili.danmaku_off",
@@ -54,10 +57,27 @@ R2_ACTIONS: tuple[str, ...] = (
     "system.open_app",
     "system.vol_up",
     "system.vol_down",
+    "system.volume",
     "system.mute",
     "system.screenshot",
 )
 ALL_ACTIONS: tuple[str, ...] = R1_ACTIONS + R2_ACTIONS
+
+# Actions the host advertises to the device by default. The media controls are
+# executed against the live player and verified by reading the UI back.
+ENABLED_ACTIONS: tuple[str, ...] = R1_ACTIONS + (
+    "bilibili.like",
+    "bilibili.coin",
+    "bilibili.favorite",
+    "bilibili.comments",
+    "bilibili.seek",
+    "bilibili.send_danmaku",
+    "bilibili.next",
+    "bilibili.prev",
+    "system.vol_up",
+    "system.vol_down",
+    "system.volume",
+)
 REPLAY_ACTIONS: tuple[str, ...] = (
     "bilibili.pause",
     "bilibili.resume",
@@ -340,6 +360,9 @@ class Begin(_Strict):
     kind: Literal["audio"] = "audio"
     format: AudioFormat
     trigger: Literal["esp32_ptt"] = "esp32_ptt"
+    # Wire encoding of the binary frames. The logical audio stays
+    # s16le/16000/mono; "ima4" only describes how those PCM bytes travel.
+    codec: Literal["s16le", "ima4"] = "s16le"
 
     @model_validator(mode="after")
     def _format_fixed(self) -> "Begin":
@@ -546,6 +569,9 @@ class Result(_Strict):
     state: CommandState
     code: Union[ErrorCode, None] = None
     summary: str = Field(max_length=128)
+    # Short ASCII label for the device screen (Montserrat has no CJK glyphs).
+    # The host owns the wording so the device never guesses from Chinese text.
+    detail: str = Field(default="", max_length=40)
     step_results: list[StepResult] = Field(max_length=MAX_STEPS)
     replayable: bool
 
@@ -756,8 +782,39 @@ ACTION_PARAM_TYPES: dict[str, type[_Params]] = {
 }
 
 
+class CoinParams(_Params):
+    count: int = Field(default=1, ge=1, le=2)
+
+
+class CommentsParams(_Params):
+    open: bool = True
+
+
+class SeekParams(_Params):
+    delta_s: Union[int, None] = Field(default=None, ge=-3600, le=3600)
+    target_s: Union[int, None] = Field(default=None, ge=0, le=86400)
+
+    @model_validator(mode="after")
+    def _one_of(self) -> "SeekParams":
+        if (self.delta_s is None) == (self.target_s is None):
+            raise ValueError("seek requires exactly one of delta_s or target_s")
+        return self
+
+
+class VolumeTargetParams(_Params):
+    target: int = Field(ge=0, le=100)
+
+
 class FavoriteParams(_Params):
     video_id: Union[str, None] = None
+    folder: Union[str, None] = Field(default=None, max_length=32)
+
+    @field_validator("folder")
+    @classmethod
+    def _folder(cls, v: str | None) -> str | None:
+        if v is not None:
+            _chars_and_bytes(v, 32, 96, "folder")
+        return v
 
     @field_validator("video_id")
     @classmethod
@@ -769,6 +826,10 @@ class FavoriteParams(_Params):
 
 ACTION_PARAM_TYPES["bilibili.favorite"] = FavoriteParams
 ACTION_PARAM_TYPES["bilibili.like"] = FavoriteParams
+ACTION_PARAM_TYPES["bilibili.coin"] = CoinParams
+ACTION_PARAM_TYPES["bilibili.comments"] = CommentsParams
+ACTION_PARAM_TYPES["bilibili.seek"] = SeekParams
+ACTION_PARAM_TYPES["system.volume"] = VolumeTargetParams
 
 
 class ActionStep(_Strict):

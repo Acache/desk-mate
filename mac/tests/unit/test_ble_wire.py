@@ -84,6 +84,35 @@ def test_channel_fragment_credit_and_receive():
         await c.close()
     asyncio.run(run())
 
+def test_ack_batches_audio_and_acks_control_messages():
+    class SilentRadio:
+        is_connected=True
+        def __init__(self):self.writes=[]
+        async def write_gatt_char(self,uuid,data,response):self.writes.append(data)
+        async def stop_notify(self,uuid):pass
+    def acks(radio):
+        return [HEADER.unpack_from(w)[3] for w in radio.writes if w[1]==3]
+    async def run():
+        # Three packets of a 648-byte audio message must not spend a connection
+        # event on an acknowledgement; the fourth packet acknowledges all four.
+        radio=SilentRadio();c=BleChannel(radio,7,247);c.worker=asyncio.create_task(c._pump())
+        for seq,off,size in [(0,0,228),(1,228,228),(2,456,192)]:
+            c.notification(None,packet(2,7,seq,off,648,b'x'*size))
+        await asyncio.sleep(.05)
+        assert acks(radio)==[]
+        c.notification(None,packet(2,7,3,0,648,b'x'*228))
+        await asyncio.sleep(.05)
+        assert acks(radio)==[4]
+        await c.close()
+        # A control message is acknowledged even when fewer than four packets
+        # are outstanding, so the peripheral never waits on a tail ACK.
+        radio=SilentRadio();c=BleChannel(radio,7,247);c.worker=asyncio.create_task(c._pump())
+        c.notification(None,packet(1,7,0,0,2,b'{}'))
+        await asyncio.sleep(.05)
+        assert acks(radio)==[1]
+        await c.close()
+    asyncio.run(run())
+
 def test_stale_epoch_closes_channel():
     async def run():
         c=BleChannel(Radio(),7,247);c.worker=asyncio.create_task(c._pump())
@@ -137,3 +166,21 @@ def test_mac_hid_peripheral_can_be_connected_with_state_zero(monkeypatch):
     monkeypatch.setitem(sys.modules,'bleak.backends.device',SimpleNamespace(BLEDevice=Device))
     device=asyncio.run(bridge.resolve_device('known-uuid'))
     assert device.address=='known-uuid' and device.details[1] is delegate
+
+def test_notification_stall_rearms_subscription(monkeypatch):
+    import voice_assistant.ble_bridge as bridge
+    monkeypatch.setattr(bridge, 'IDLE_RECHECK_SECONDS', 0.05)
+    class Radio:
+        is_connected=True
+        def __init__(self):self.calls=[]
+        async def write_gatt_char(self,uuid,data,response):pass
+        async def stop_notify(self,uuid):self.calls.append('stop')
+        async def start_notify(self,uuid,cb):self.calls.append('start')
+    async def run():
+        radio=Radio();c=BleChannel(radio,7,247);c.worker=asyncio.create_task(c._pump())
+        await asyncio.sleep(0.14)
+        assert radio.calls.count('start')>=1, radio.calls
+        c.notification(None,packet(1,7,0,0,2,b'{}'))
+        assert (await asyncio.wait_for(c.receive(),1))['text']=='{}'
+        await c.close()
+    asyncio.run(run())

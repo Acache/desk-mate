@@ -1,4 +1,5 @@
 #include "transport.h"
+#include "adpcm.h"
 #include "../media_ble/ble_voice.h"
 #include "../media_ble/ble_voice_bindings.h"
 #include "../media_ble/ble_manager.h"
@@ -33,11 +34,16 @@ static volatile bool s_pending = false;
 static volatile bool s_ack_unknown=false;
 void vc_transport_ack_unknown(){s_ack_unknown=true;}
 static char s_status[64] = "OFFLINE";
+/* Last server progress stage reported by the pipeline (transcribing/planning/executing). */
+static char s_stage[16];
 static QueueHandle_t s_host_requests;
 static VoiceHostCatalog s_hosts;
 static VoiceHostView s_host_view;
 static portMUX_TYPE s_host_mux=portMUX_INITIALIZER_UNLOCKED;
 static bool s_ble_mode=true;
+static adpcm_state_t s_adpcm;
+/* Owned by the voice transport task only; keeps 640 B off its stack. */
+static uint8_t s_adpcm_recon[VOICE_FRAME_BYTES];
 static bool s_paused=false,s_network_setup=false,s_switch_reset=false;
 static uint32_t s_switch_until=0,s_retry_at=0,s_setup_until=0;
 static char s_host_message[64];
@@ -147,7 +153,9 @@ static bool send_feedback_doc() {
 }
 
 static void set_status(const char *text) {
-    snprintf(s_status, sizeof(s_status), "%s", text ? text : "");
+    const char *next = text ? text : "";
+    if (strcmp(s_status, next) != 0) Serial.printf("VOICE: status=%s\n", next);
+    snprintf(s_status, sizeof(s_status), "%s", next);
 }
 
 static void post_event(voice_event_type_t type, voice_result_t result = VOICE_RESULT_NONE,
@@ -480,6 +488,8 @@ static void send_begin(const voice_action_t &a) {
     s_ts.last_ack_ms = millis();
     s_ts.last_send_ms = millis();
     s_ts.replay = false;
+    s_stage[0] = 0;
+    adpcm_reset(&s_adpcm);
     start_sha();
     JsonDocument doc;
     doc["v"] = 1;
@@ -487,6 +497,10 @@ static void send_begin(const voice_action_t &a) {
     doc["msg_id"] = 2;
     doc["command_id"] = a.command_id;
     doc["kind"] = "audio";
+    /* BLE carries IMA ADPCM (4:1): the link sustains ~21 KB/s but raw PCM
+     * needs 32 KB/s, so a user who pauses before talking silently overflowed
+     * the 1.28 s ring. Wi-Fi keeps the original raw stream. */
+    doc["codec"] = s_ble_mode ? "ima4" : "s16le";
     JsonObject fmt = doc["format"].to<JsonObject>();
     fmt["encoding"] = "s16le";
     fmt["rate"] = 16000;
@@ -611,30 +625,44 @@ static void drain_ring() {
     // than real time instead of bursting the entire ring into TLS; this keeps
     // the server's receive/ack loop responsive and prevents PCM ring overflow.
     if (s_ts.last_send_ms != 0 && millis() - s_ts.last_send_ms < 10) return;
-    if(s_ble_mode&&!ble_voice_writable())return;
+    if(s_ble_mode){BvLink link;ble_voice_link(&link);
+        // A brief readiness flap must not be mistaken for a dead link and
+        // tear the session down; keep the frame in the ring and retry.
+        if(!link.ready||!ble_voice_writable())return;}
     uint8_t frame[VOICE_FRAME_BYTES];
     uint16_t len = 0;
     int sent_this_round = 0;
     while (sent_this_round < 1 && pcm_ring_pop(s_ring, frame, &len)) {
-        if (len == 0 || len > VOICE_FRAME_BYTES) return;
+        if (len != VOICE_FRAME_BYTES) return;
         uint8_t msg[8 + VOICE_FRAME_BYTES];
+        uint8_t *recon = s_adpcm_recon;
+        uint16_t wire_len = len;
+        if (s_ble_mode) {
+            // 640 B -> 164 B keeps the stream at 8 KB/s, well inside the link.
+            wire_len = (uint16_t)adpcm_encode_block(frame, len, msg + 8, &s_adpcm, recon);
+            if (wire_len != ADPCM_BLOCK_BYTES) return;
+        } else {
+            memcpy(msg + 8, frame, len);
+        }
         msg[0] = (uint8_t)(s_ts.frame_count & 0xff);
         msg[1] = (uint8_t)((s_ts.frame_count >> 8) & 0xff);
         msg[2] = (uint8_t)((s_ts.frame_count >> 16) & 0xff);
         msg[3] = (uint8_t)((s_ts.frame_count >> 24) & 0xff);
-        msg[4] = (uint8_t)(len & 0xff);
-        msg[5] = (uint8_t)((len >> 8) & 0xff);
+        msg[4] = (uint8_t)(wire_len & 0xff);
+        msg[5] = (uint8_t)((wire_len >> 8) & 0xff);
         msg[6] = 0;
         msg[7] = 0;
-        memcpy(msg + 8, frame, len);
-        if (!ws_send_frame(0x2, msg, 8 + len)) {
+        if (!ws_send_frame(0x2, msg, 8 + wire_len)) {
             Serial.printf("VOICE: audio frame send failed seq=%u len=%u heap=%u\n",
-                          (unsigned)s_ts.frame_count, (unsigned)len, ESP.getFreeHeap());
+                          (unsigned)s_ts.frame_count, (unsigned)wire_len, ESP.getFreeHeap());
             s_connected = false;
             s_client.stop();
             return;
         }
-        if (s_ts.sha_active) mbedtls_sha256_update(&s_ts.sha, frame, len);
+        // Hash exactly what the host will store (the reconstructed PCM), so the
+        // existing seal/commit SHA check keeps working through the lossy codec.
+        if (s_ts.sha_active)
+            mbedtls_sha256_update(&s_ts.sha, s_ble_mode ? recon : frame, len);
         s_ts.frame_count++;
         s_ts.pcm_bytes += len;
         s_ts.last_send_ms = millis();
@@ -701,15 +729,23 @@ static void handle_result(JsonDocument &doc, bool from_status) {
     voice_result_t r = map_result(state);
     const char *code = doc["code"] | "";
     const char *summary = doc["summary"] | "";
+    const char *detail = doc["detail"] | "";
     bool replayable = doc["replayable"] | false;
     if (from_status) {
         JsonObject rr = doc["result"].as<JsonObject>();
         if (!rr.isNull()) {
             code = rr["code"] | "";
             summary = rr["summary"] | "";
+            detail = rr["detail"] | "";
             replayable = rr["replayable"] | false;
         }
     }
+    // The host owns the wording; only old hosts fall back to the Chinese summary.
+    bool label_ascii = detail[0] != 0;
+    for (const unsigned char *c = (const unsigned char *)detail; *c; ++c)
+        if (*c >= 128) label_ascii = false;
+    const char *label = label_ascii ? detail : summary;
+    s_stage[0] = 0;
     if (r != VOICE_RESULT_UNKNOWN) {
         clear_pending();
         s_ts.pending_query_done = true;
@@ -719,7 +755,7 @@ static void handle_result(JsonDocument &doc, bool from_status) {
         s_ts.seal_pending = false;
         s_ts.seal_sent = false;
     }
-    post_event(VOICE_EV_RESULT, r, code[0] ? 1 : 0, summary[0] ? summary : nullptr, replayable);
+    post_event(VOICE_EV_RESULT, r, code[0] ? 1 : 0, label[0] ? label : nullptr, replayable);
 }
 
 static void handle_text(const char *text, size_t len) {
@@ -789,6 +825,8 @@ static void handle_text(const char *text, size_t len) {
         s_ts.last_pong_ms = millis();
     } else if (strcmp(type, "progress") == 0) {
         s_ts.last_pong_ms = millis();
+        const char *stage = doc["stage"] | "";
+        if (stage[0]) snprintf(s_stage, sizeof(s_stage), "%s", stage);
     }
 }
 
@@ -961,8 +999,12 @@ static void service_session(){
         drain_ring();
         if(millis()-s_ts.ping_ms>=5000){
             s_ts.ping_ms=millis();
-            if(millis()-s_ts.last_pong_ms>16000)host_disconnect();
-            else {JsonDocument ping;ping["v"]=1;ping["type"]="ping";ping["msg_id"]=100;send_doc(ping);}
+            // The host re-arms its notification subscription within ~7 s if
+            // macOS stops delivering. Only give up well after that.
+            if(millis()-s_ts.last_pong_ms>30000)host_disconnect();
+            else {JsonDocument ping;ping["v"]=1;ping["type"]="ping";ping["msg_id"]=100;
+                bool ok=send_doc(ping);uint32_t tx=0,ack=0;ble_voice_stats(&tx,&ack);
+                Serial.printf("VOICE: ping ok=%d q=%u sent=%lu acked=%lu\n",ok?1:0,(unsigned)ble_voice_queue_free(),(unsigned long)tx,(unsigned long)ack);}
         }
     }
     if(!s_connected){if(s_ble_mode)ble_voice_reset();s_ready=false;post_event(VOICE_EV_TRANSPORT_LOST);s_retry_at=millis()+1000;}
@@ -1047,3 +1089,4 @@ bool vc_transport_ready() { return s_ready; }
 bool vc_transport_pending() { return s_pending; }
 uint32_t vc_transport_generation() { return s_generation; }
 const char *vc_transport_status() { return s_status; }
+const char *vc_transport_stage() { return s_stage; }

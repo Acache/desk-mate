@@ -47,6 +47,91 @@ log = logging.getLogger("voice_assistant.pipeline")
 log.setLevel(logging.INFO)
 
 
+def _is_ascii(text: str) -> bool:
+    return bool(text) and all(ord(c) < 128 for c in text)
+
+
+# Short labels for the 480x480 device: Montserrat has no CJK glyphs, and the
+# device must never infer the reason from Chinese summary words. Keep these
+# ASCII and <= 24 characters.
+_DETAIL_BY_CODE = {
+    ErrorCode.READY_FALSE: "MAC NOT READY",
+    ErrorCode.BUSY: "MAC BUSY / RETRY",
+    ErrorCode.AUTH_FAILED: "AUTH FAILED",
+    ErrorCode.PAIRING_REQUIRED: "PAIR THIS MAC AGAIN",
+    ErrorCode.PROTOCOL_ERROR: "PROTOCOL ERROR",
+    ErrorCode.COMMAND_NOT_FOUND: "COMMAND EXPIRED",
+    ErrorCode.AUDIO_INVALID: "AUDIO INVALID",
+    ErrorCode.AUDIO_OVERRUN: "AUDIO TOO LONG",
+    ErrorCode.HASH_MISMATCH: "AUDIO CHECK FAILED",
+    ErrorCode.SHORT_PRESS: "HOLD LONGER",
+    ErrorCode.USER_CANCELED: "CANCELED",
+    ErrorCode.RECORDING_TIMEOUT: "RECORDING TOO LONG",
+    ErrorCode.DISK_FULL: "MAC DISK FULL",
+    ErrorCode.STORAGE_ERROR: "MAC STORAGE ERROR",
+    ErrorCode.MODEL_UNAVAILABLE: "MAC MODEL OFFLINE",
+    ErrorCode.MODEL_TIMEOUT: "MAC MODEL TIMEOUT",
+    ErrorCode.OUT_OF_SCOPE: "NOT A BILIBILI COMMAND",
+    ErrorCode.INVALID_PLAN: "CANNOT PLAN / RETRY",
+    ErrorCode.CAPABILITY_UNAVAILABLE: "ACTION UNAVAILABLE",
+    ErrorCode.TARGET_STALE: "CHECK THE APP",
+    ErrorCode.PERMISSION_DENIED: "MAC PERMISSION",
+    ErrorCode.RATE_LIMITED: "TOO MANY REQUESTS",
+    ErrorCode.ACTION_FAILED: "ACTION FAILED",
+    ErrorCode.INTERRUPTED: "INTERRUPTED / RETRY",
+    ErrorCode.OUTCOME_UNKNOWN: "UNKNOWN / CHECK MAC",
+}
+
+
+_ACTION_DETAIL = {
+    "bilibili.like": "LIKED",
+    "bilibili.coin": "COIN SENT",
+    "bilibili.favorite": "FAVORITED",
+    "bilibili.comments": "COMMENTS",
+    "bilibili.seek": "SEEKED",
+    "bilibili.send_danmaku": "DANMAKU SENT",
+    "bilibili.next": "NEXT EPISODE",
+    "bilibili.prev": "PREV EPISODE",
+    "system.vol_up": "VOLUME UP",
+    "system.vol_down": "VOLUME DOWN",
+    "system.volume": "VOLUME SET",
+}
+
+
+def action_detail(state: CommandState, action: str | None) -> str | None:
+    """Short ASCII label for a single player-control action."""
+    if state is CommandState.SUCCEEDED and action in _ACTION_DETAIL:
+        return _ACTION_DETAIL[action]
+    return None
+
+
+def result_detail(state: CommandState, code: ErrorCode | None, summary: str) -> str:
+    """Pick the short ASCII label shown on the device for a finished command."""
+    if state is CommandState.SUCCEEDED:
+        return summary if _is_ascii(summary) and len(summary) <= 24 else "DONE"
+    if state is CommandState.PARTIAL:
+        return "PARTIAL DONE"
+    if state is CommandState.CANCELED:
+        return "CANCELED"
+    if state is CommandState.OUTCOME_UNKNOWN:
+        return "UNKNOWN / CHECK MAC"
+    if code is ErrorCode.NO_SPEECH:
+        return "NOT CLEAR / TRY AGAIN" if "听清" in summary else "NO SPEECH / TRY AGAIN"
+    if code is ErrorCode.CLARIFY_NEEDED:
+        if "搜索" in summary:
+            return "SEARCH FIRST"
+        if "多个动作" in summary or "分开说" in summary:
+            return "SAY ONE COMMAND"
+        if "弹幕" in summary:
+            return "OPEN THE VIDEO FIRST"
+        return "NEED MORE INFO"
+    if code is None:
+        return "FAILED / SEE MAC"
+    if code is ErrorCode.ACTION_FAILED and "首页" in summary:
+        return "OPEN THE BILIBILI HOME"
+    return _DETAIL_BY_CODE.get(code, "FAILED / SEE MAC")
+
+
 @dataclass
 class PipelineContext:
     cfg: AppConfig
@@ -59,6 +144,9 @@ class PipelineContext:
     notify_error: Callable[[str], None] | None = None
     refresh_player: Callable[[], Any] | None = None
     personalizer: Any | None = None
+    # Transcripts started at Seal (audio complete) so STT overlaps the device's
+    # cancel window instead of starting only after Commit.
+    early_stt: dict[str, Any] | None = None
 
 
 class Pipeline:
@@ -152,12 +240,18 @@ class Pipeline:
                 status=StepState(step["state"]),
                 code=ErrorCode(step["error_code"]) if step["error_code"] else None,
             ))
+        code = ErrorCode(row["error_code"]) if row["error_code"] else None
+        summary = (row["summary"] or self._summary_for(state))[:128]
+        detail = result_detail(state, code, summary)
+        if len(row["steps"]) == 1:
+            detail = action_detail(state, row["steps"][0]["action"]) or detail
         return Result(
             msg_id=0,
             command_id=UUID(command_id),
             state=state,
-            code=ErrorCode(row["error_code"]) if row["error_code"] else None,
-            summary=(row["summary"] or self._summary_for(state))[:128],
+            code=code,
+            summary=summary,
+            detail=detail,
             step_results=steps,
             replayable=self._replayable(row),
         )
@@ -214,7 +308,16 @@ class Pipeline:
                 return
             self.ctx.db.transition(command_id, CommandState.TRANSCRIBING)
             await notify(Progress(msg_id=0, command_id=UUID(command_id), stage="transcribing", step_index=None))
-            transcript = await asyncio.to_thread(self.ctx.stt.transcribe, wav_path, deadline)
+            transcript = None
+            early = (self.ctx.early_stt or {}).pop(command_id, None)
+            if early is not None:
+                try:
+                    transcript = await asyncio.wait_for(asyncio.shield(early), timeout=60)
+                except Exception as exc:  # noqa: BLE001 - fall back to a fresh run
+                    log.warning("early STT failed, retrying: %s", exc)
+                    transcript = None
+            if transcript is None:
+                transcript = await asyncio.to_thread(self.ctx.stt.transcribe, wav_path, deadline)
             t_stt = time.perf_counter()
             if self._cancelled(command_id):
                 return
@@ -236,7 +339,11 @@ class Pipeline:
             self.ctx.db.transition(command_id, CommandState.PLANNING)
             await notify(Progress(msg_id=0, command_id=UUID(command_id), stage="planning", step_index=None))
             t_refresh0 = time.perf_counter()
-            if self.ctx.refresh_player and any(k in transcript.normalized_text for k in ("暂停", "继续", "恢复")):
+            if self.ctx.refresh_player and any(
+                k in transcript.normalized_text
+                for k in ("暂停", "继续", "恢复", "点赞", "投币", "收藏", "弹幕", "评论",
+                          "快进", "后退", "上一集", "下一集", "上集", "下集")
+            ):
                 try:
                     await asyncio.to_thread(self.ctx.refresh_player)
                 except Exception:

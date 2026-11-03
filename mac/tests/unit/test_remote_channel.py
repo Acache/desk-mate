@@ -66,3 +66,91 @@ def test_synthetic_staging_never_executes(tmp_path,finish):
         assert state.manager.attached is None
         db.close()
     asyncio.run(run())
+
+def test_adpcm_frames_are_decoded_before_staging(tmp_path):
+    import hashlib
+    import struct
+    from voice_assistant import adpcm
+    from voice_assistant.config import load_config
+    from voice_assistant.storage import Database
+    from voice_assistant.sessions import StageStore, CommandService
+    async def run():
+        cfg=load_config(tmp_path);db=Database(cfg.db_path)
+        device,_=db.register_device('synthetic ima4 fixture')
+        stages=StageStore(cfg,db);command=str(uuid4())
+        pcm=b'\x20\x00'*320
+        state=(0,0);blocks=[];recon_all=b''
+        for _ in range(5):
+            block,state,recon=adpcm.encode_block(pcm,state)
+            blocks.append(block);recon_all+=recon
+        base={'v':1,'msg_id':1}
+        def text(**kw):return {'text':json.dumps(base|kw)}
+        messages=[text(type='hello',device_id=device,server_id=cfg.server.server_id,firmware_version='fixture',boot_id=str(uuid4())),
+            text(type='begin',command_id=command,kind='audio',format=dict(encoding='s16le',rate=16000,channels=1),trigger='esp32_ptt',codec='ima4')]
+        messages.extend({'bytes':struct.pack('<IHH',i,adpcm.BLOCK_BYTES,0)+blocks[i]} for i in range(5))
+        messages.append(text(type='seal',command_id=command,frame_count=5,pcm_bytes=len(recon_all),sha256=hashlib.sha256(recon_all).hexdigest()))
+        messages.append(text(type='cancel',command_id=command,reason='user'))
+        captured={}
+        original_seal=stages.seal
+        def spy(cid,frame_count,pcm_bytes,sha):
+            captured['pcm']=(cfg.staging_dir/f'{cid}.pcm.part').read_bytes()
+            return original_seal(cid,frame_count,pcm_bytes,sha)
+        stages.seal=spy
+        state_ns=SimpleNamespace(cfg=cfg,db=db,stages=stages,service=CommandService(cfg,db,stages),manager=Manager(),ready=lambda:(True,None),capabilities=lambda:())
+        channel=Channel(messages)
+        await serve_remote_session(state_ns,channel,device)
+        assert any(m['type']=='seal_ack' for m in channel.sent), channel.sent
+        assert captured['pcm']==recon_all and len(captured['pcm'])==5*640
+        db.close()
+    asyncio.run(run())
+
+
+def test_seal_starts_early_stt_and_cancel_clears_it(tmp_path):
+    import hashlib
+    import struct
+    from voice_assistant.config import load_config
+    from voice_assistant.storage import Database
+    from voice_assistant.sessions import StageStore
+
+    async def run(finish):
+        cfg = load_config(tmp_path)
+        db = Database(cfg.db_path)
+        device, _ = db.register_device("early STT fixture")
+        stages = StageStore(cfg, db)
+        command = str(uuid4())
+        pcm = b"\x01\x00" * 320
+        calls: list[str] = []
+
+        class Stt:
+            def transcribe(self, path, deadline):
+                calls.append(str(path))
+                return SimpleNamespace(normalized_text="测试")
+
+        state = SimpleNamespace(
+            cfg=cfg, db=db, stages=stages, service=None, manager=Manager(),
+            ready=lambda: (True, None), capabilities=lambda: (),
+            stt=Stt(), early_stt={},
+        )
+        base = {"v": 1, "msg_id": 1}
+
+        def text(**kw):
+            return {"text": json.dumps(base | kw)}
+
+        messages = [
+            text(type="hello", device_id=device, server_id=cfg.server.server_id,
+                 firmware_version="fixture", boot_id=str(uuid4())),
+            text(type="begin", command_id=command, kind="audio",
+                 format=dict(encoding="s16le", rate=16000, channels=1), trigger="esp32_ptt"),
+        ]
+        messages.extend({"bytes": struct.pack("<IHH", i, 640, 0) + pcm} for i in range(25))
+        messages.append(text(type="seal", command_id=command, frame_count=25,
+                             pcm_bytes=16000, sha256=hashlib.sha256(pcm * 25).hexdigest()))
+        if finish == "cancel":
+            messages.append(text(type="cancel", command_id=command, reason="user"))
+        await serve_remote_session(state, Channel(messages), device)
+        return calls, state.early_stt
+
+    calls, early = asyncio.run(run("disconnect"))
+    assert early, "seal must start an early STT task"
+    task = next(iter(early.values()))
+    assert hasattr(task, "cancel")

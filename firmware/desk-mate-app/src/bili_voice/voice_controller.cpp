@@ -52,7 +52,14 @@ static void ui_publish() {
     snprintf(snapshot.summary, sizeof(snapshot.summary), "%s", s_fsm.summary);
     snprintf(snapshot.transport, sizeof(snapshot.transport), "%s",
              cfg && !cfg->valid ? "UNPAIRED" : vc_transport_status());
+    snprintf(snapshot.stage, sizeof(snapshot.stage), "%s", vc_transport_stage());
     snprintf(snapshot.command_id, sizeof(snapshot.command_id), "%s", s_fsm.command_id);
+    static int last_logged_state = -1;
+    if ((int)s_fsm.state != last_logged_state) {
+        last_logged_state = (int)s_fsm.state;
+        Serial.printf("VOICE: fsm t=%lu state=%d result=%d\n",
+                      (unsigned long)millis(), (int)s_fsm.state, (int)s_fsm.result);
+    }
     portENTER_CRITICAL(&s_mux);
     s_ui = snapshot;
     portEXIT_CRITICAL(&s_mux);

@@ -60,12 +60,20 @@ class AudioValidation:
     sample_rate: int
     channels: int
     bits: int
+    active_ms: int = 0
+    active_rms: float = 0.0
 
     def is_speech_like(self) -> bool:
+        # Push-to-talk recordings normally start with a silent lead-in while
+        # the user waits for the device to show LISTENING. Whole-file RMS then
+        # understates the level and rejects real speech (observed: 0.00247 vs
+        # the 0.0025 threshold on a valid "搜索机器学习" take). Accept audio
+        # whose *active* frames are loud enough for long enough instead.
         return (
             self.duration_ms >= 500
             and self.quality_label not in {"silent", "clipped"}
-            and self.rms >= 0.0025
+            and (self.rms >= 0.0025
+                 or (self.active_ms >= 300 and self.active_rms >= 0.005))
         )
 
 
@@ -92,10 +100,15 @@ def validate_audio(path: Path) -> AudioValidation:
     # Frame-level silence ratio (20 ms frames below -50 dBFS).
     frame = 320
     usable = (samples.size // frame) * frame
+    active_ms, active_rms = 0, 0.0
     if usable:
         blocks = samples[:usable].reshape(-1, frame)
         block_rms = np.sqrt(np.mean(np.square(blocks), axis=1))
         silence = float(np.mean(block_rms < 0.0032))
+        active = block_rms[block_rms >= 0.0032]
+        active_ms = int(active.size * 20)
+        if active.size:
+            active_rms = float(np.sqrt(np.mean(np.square(active))))
     else:
         silence = 1.0
     if clipped > 0.01:
@@ -111,6 +124,7 @@ def validate_audio(path: Path) -> AudioValidation:
         rms=round(rms, 6), peak=round(peak, 6), clipped_ratio=round(clipped, 6),
         dc_offset=round(dc, 6), silence_ratio=round(silence, 6), quality_label=quality,
         sample_rate=rate, channels=channels, bits=bits,
+        active_ms=active_ms, active_rms=round(active_rms, 6),
     )
 
 

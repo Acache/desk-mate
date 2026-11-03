@@ -68,9 +68,41 @@ def test_bare_play_uses_resume_when_player_exists():
     assert p is not None and p.actions[0].action == "bilibili.resume"
 
 
-def test_favorite_is_explicitly_unsupported():
+def test_player_controls_are_supported():
+    from voice_assistant.intent import rule_based_proposal, unsupported_intent_reason
+    assert unsupported_intent_reason("收藏这个视频") is None
+    cases = {
+        "点赞": ("bilibili.like", {}),
+        "给视频点赞": ("bilibili.like", {}),
+        "投币": ("bilibili.coin", {"count": 1}),
+        "投两个币": ("bilibili.coin", {"count": 2}),
+        "收藏这个视频": ("bilibili.favorite", {}),
+        "收藏到房车": ("bilibili.favorite", {"folder": "房车"}),
+        "收藏到干活白噪音文件夹": ("bilibili.favorite", {"folder": "干活白噪音"}),
+        "打开评论区": ("bilibili.comments", {"open": True}),
+        "关闭评论区": ("bilibili.comments", {"open": False}),
+        "快进30秒": ("bilibili.seek", {"delta_s": 30}),
+        "后退10秒": ("bilibili.seek", {"delta_s": -10}),
+        "快进到第1分30秒": ("bilibili.seek", {"target_s": 90}),
+        "快进到30秒": ("bilibili.seek", {"target_s": 30}),
+        "下一集": ("bilibili.next", {}),
+        "上一集": ("bilibili.prev", {}),
+        "音量调到百分之六十": ("system.volume", {"target": 60}),
+        "音量调到60%": ("system.volume", {"target": 60}),
+        "音量调大": ("system.vol_up", {"delta": 5}),
+        "音量调小": ("system.vol_down", {"delta": 5}),
+        "发送弹幕 好可爱": ("bilibili.send_danmaku", {"text": "好可爱"}),
+    }
+    for text, (action, params) in cases.items():
+        proposal = rule_based_proposal(text)
+        assert proposal is not None, text
+        assert [a.action for a in proposal.actions] == [action], (text, proposal)
+        assert proposal.actions[0].params == params, (text, proposal.actions[0].params)
+
+
+def test_follow_is_still_unsupported():
     from voice_assistant.intent import unsupported_intent_reason
-    assert "R2" in (unsupported_intent_reason("收藏这个视频") or "")
+    assert unsupported_intent_reason("关注这个UP主")
 
 
 def test_click_ordinal_uses_search_snapshot():

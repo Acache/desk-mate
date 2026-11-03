@@ -31,6 +31,7 @@ static void read_bili_status(FocusBiliStatus *out) {
   out->rms = st.rms;
   snprintf(out->summary, sizeof(out->summary), "%s", st.summary);
   snprintf(out->transport, sizeof(out->transport), "%s", st.transport);
+  snprintf(out->stage, sizeof(out->stage), "%s", st.stage);
   snprintf(out->command_id, sizeof(out->command_id), "%s", st.command_id);
 }
 
@@ -148,8 +149,9 @@ void loop() {
         } else if (bt_is_open()) {
           bt_key(0, false);
         } else if (focus_page == PAGE_BILI) {
+          // PWR cancels an active voice command; it must not navigate away from
+          // page 3 (the cancel window itself is driven by a second KEY press).
           vc_controller_pmic_short();
-          focus_go_page(PAGE_FOCUS, true);
         } else {
           focus_action(0);
         }

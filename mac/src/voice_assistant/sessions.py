@@ -20,7 +20,7 @@ from typing import Any
 
 import numpy as np
 
-from . import contracts
+from . import adpcm, contracts
 from .config import AppConfig, unix_to_iso, utc_now
 from .contracts import (
     AUDIO_FORMAT,
@@ -176,11 +176,11 @@ class StageStore:
                 os.fsync(fh.fileno())
         return row
 
-    def append(self, command_id: str, data: bytes) -> AppendReceipt:
+    def append(self, command_id: str, data: bytes, codec: str = "s16le") -> AppendReceipt:
         with self._lock:
-            return self._append_locked(command_id, data)
+            return self._append_locked(command_id, data, codec)
 
-    def _append_locked(self, command_id: str, data: bytes) -> AppendReceipt:
+    def _append_locked(self, command_id: str, data: bytes, codec: str = "s16le") -> AppendReceipt:
         if command_id not in self._progress:
             row = self.db.get_command(command_id)
             if not row:
@@ -196,6 +196,16 @@ class StageStore:
         payload = data[8:]
         if pcm_len != len(payload):
             raise SessionError(ErrorCode.AUDIO_INVALID, "pcm_len does not match payload")
+        if codec == "ima4":
+            # One 164-byte ADPCM block always reconstructs 640 PCM bytes; the
+            # frame sequence and byte budget below are tracked in decoded PCM so
+            # seal/commit keep their existing semantics.
+            if pcm_len != adpcm.BLOCK_BYTES:
+                raise SessionError(ErrorCode.AUDIO_INVALID, "adpcm block length")
+            payload = adpcm.decode_block(payload)
+            pcm_len = len(payload)
+        elif codec != "s16le":
+            raise SessionError(ErrorCode.AUDIO_INVALID, "unsupported audio codec")
         if pcm_len < 2 or pcm_len % 2 or pcm_len > MAX_FRAME_PCM_BYTES:
             raise SessionError(ErrorCode.AUDIO_INVALID, "invalid PCM frame length")
         expected_seq, expected_bytes = self._progress[command_id]

@@ -29,6 +29,7 @@ from ..config import AppConfig, BILIBILI_BUNDLE_ID, utc_now
 from ..ax_daemon import AxDaemon, AxDaemonError
 from ..contracts import ActionResult, ErrorCode, SearchResult, StepState
 from ..storage import Database
+from . import cdp_player, player_ui
 from .base import (
     ActionAdapter,
     AdapterError,
@@ -200,7 +201,11 @@ class BilibiliAdapter(ActionAdapter):
             return caps
         caps.available.add("bilibili.open")
         if self.accessibility_trusted():
-            caps.available |= {"bilibili.search", "bilibili.play", "bilibili.pause", "bilibili.resume"}
+            caps.available |= {
+                "bilibili.search", "bilibili.play", "bilibili.pause", "bilibili.resume",
+                "bilibili.like", "bilibili.coin", "bilibili.favorite", "bilibili.comments",
+                "bilibili.seek", "bilibili.send_danmaku", "bilibili.next", "bilibili.prev",
+            }
         else:
             for action in ("bilibili.search", "bilibili.play", "bilibili.pause", "bilibili.resume"):
                 caps.reasons[action] = (
@@ -302,7 +307,10 @@ class BilibiliAdapter(ActionAdapter):
     # ------------------------------------------------------------------
     def _launch(self) -> None:
         try:
-            subprocess.run(["open", "-b", BILIBILI_BUNDLE_ID], check=True, timeout=10)
+            # Launch with the local DevTools port so player controls can be
+            # driven through the DOM (no OCR, no pixels) when possible.
+            subprocess.run(["open", "-b", BILIBILI_BUNDLE_ID, "--args",
+                            "--remote-debugging-port=9222"], check=True, timeout=10)
         except Exception as exc:
             raise AdapterError(ErrorCode.ACTION_FAILED, f"could not launch Bilibili: {exc}") from exc
         for _ in range(40):
@@ -318,17 +326,26 @@ class BilibiliAdapter(ActionAdapter):
             return {}
 
     def _home(self) -> None:
+        # A real AX press is what actually closes the floating player; the DOM
+        # click on the same button does not navigate in this client.
         try:
             self._helper("press", "--title", "回到主界面", timeout=8)
+            return
         except AdapterError:
             pass
+        player_ui.home()
         time.sleep(0.5)
 
     def _search_ui(self, query: str) -> dict[str, Any]:
         result = self._helper("search", query, timeout=25)
         if not result.get("ok") and result.get("error") == "search_field_not_found":
+            # A playing video exposes its comment box as a text field. Do not
+            # type into whatever happens to be focused: return to the home page
+            # and use its search box, or fail with a clear reason.
             self._home()
             result = self._helper("search", query, timeout=25)
+            if not result.get("ok") and result.get("error") == "search_field_not_found":
+                raise AdapterError(ErrorCode.ACTION_FAILED, "请先回到B站首页，再搜索")
         if not result.get("ok"):
             raise AdapterError(ErrorCode.ACTION_FAILED, f"search failed: {result.get('error', 'unknown')}")
         return result
@@ -633,6 +650,44 @@ class BilibiliAdapter(ActionAdapter):
     def _on_search_page(self) -> bool:
         return "search.html" in str(self._webarea().get("url", ""))
 
+    def _ui_call(self, fn, *args):
+        try:
+            return fn(*args)
+        except player_ui.PlayerUiError as exc:
+            raise AdapterError(ErrorCode.ACTION_FAILED, exc.message or exc.code) from exc
+
+    def _duration_seconds(self) -> int | None:
+        """Total video length from the public API (more reliable than OCR)."""
+        bvid = self._current_bvid()
+        if not bvid:
+            return None
+        data = self._api("https://api.bilibili.com/x/web-interface/view", {"bvid": bvid})
+        try:
+            value = int(((data or {}).get("data") or {}).get("duration") or 0)
+        except (TypeError, ValueError):
+            return None
+        return value or None
+
+    def _season_episode(self, direction: int) -> tuple[str, str] | None:
+        """Previous/next episode bvid from the public collection API."""
+        bvid = self._current_bvid()
+        if not bvid:
+            return None
+        data = self._api("https://api.bilibili.com/x/web-interface/view", {"bvid": bvid})
+        if not data:
+            return None
+        season = (data.get("data") or {}).get("ugc_season") or {}
+        episodes = [e for section in (season.get("sections") or [])
+                    for e in (section.get("episodes") or [])]
+        ids = [str(e.get("bvid") or "") for e in episodes]
+        if bvid not in ids:
+            return None
+        index = ids.index(bvid) + direction
+        if 0 <= index < len(ids):
+            episode = episodes[index]
+            return str(episode.get("bvid") or ""), str(episode.get("title") or "")
+        return None
+
     def _press_video(self, bvid: str, query: str, ui_index: int | None = None) -> dict[str, Any]:
         target = f"https://www.bilibili.com/video/{bvid}"
         pressed = self._helper("press-url", "--url", target, timeout=12)
@@ -749,11 +804,18 @@ class BilibiliAdapter(ActionAdapter):
             if not query:
                 raise AdapterError(ErrorCode.INVALID_PLAN, "empty query")
             return PreparedAction(resolved, {"query": query}, now)
+        if action in {
+            "bilibili.like", "bilibili.coin", "bilibili.favorite", "bilibili.comments",
+            "bilibili.seek", "bilibili.send_danmaku", "bilibili.next", "bilibili.prev",
+        }:
+            return PreparedAction(resolved, dict(resolved.params), now)
         if action == "bilibili.play":
             binding = resolved.binding
             params_bv = resolved.params.get("bv")
             if params_bv:
-                title = self.video_title(str(params_bv)) or str(params_bv)
+                # Use the BV itself; the public API lookup only added a network
+                # round-trip before the same press-url navigation.
+                title = str(params_bv)
                 return PreparedAction(resolved, {
                     "video_id": str(params_bv), "title": title, "mode": "bv", "query": title,
                 }, now)
@@ -808,6 +870,105 @@ class BilibiliAdapter(ActionAdapter):
                                          {"results": result.get("results", []),
                                           "query": p["query"],
                                           "window_title": result.get("window_title", "")})
+            if action == "bilibili.like":
+                result = self._ui_call(player_ui.like)
+                if not result.get("ok"):
+                    return InvocationReceipt(prepared, started, time.time(), False,
+                                             {"error": result.get("error", "like_failed")})
+                return InvocationReceipt(prepared, started, time.time(), True,
+                                         {"state": result.get("state"), "changed": bool(result.get("changed"))})
+            if action == "bilibili.coin":
+                result = self._ui_call(player_ui.coin, int(p.get("count") or 1))
+                if not result.get("ok"):
+                    return InvocationReceipt(prepared, started, time.time(), False,
+                                             {"error": result.get("error", "coin_failed")})
+                return InvocationReceipt(prepared, started, time.time(), True,
+                                         {"coins": result.get("coins"), "before": result.get("before"),
+                                          "after": result.get("after")})
+            if action == "bilibili.favorite":
+                folder = str(p.get("folder") or "")
+                result = self._ui_call(player_ui.favorite, folder or None)
+                if not result.get("ok"):
+                    return InvocationReceipt(prepared, started, time.time(), False,
+                                             {"error": result.get("error", "favorite_failed"),
+                                              "folder": folder or "默认收藏夹"})
+                return InvocationReceipt(prepared, started, time.time(), True,
+                                         {"folder": folder or "默认收藏夹", "changed": bool(result.get("changed"))})
+            if action == "bilibili.comments":
+                result = self._ui_call(player_ui.set_comments, bool(p.get("open", True)))
+                return InvocationReceipt(prepared, started, time.time(), True, result)
+            if action == "bilibili.seek":
+                if p.get("target_s") is not None:
+                    # seek_to resolves the duration itself (CDP) or uses arrow
+                    # steps; the public API call here only added network delay.
+                    result = self._ui_call(player_ui.seek_to, int(p["target_s"]))
+                else:
+                    result = self._ui_call(player_ui.seek_by, int(p.get("delta_s") or 0))
+                if not result.get("ok"):
+                    return InvocationReceipt(prepared, started, time.time(), False,
+                                             {"error": result.get("error", "seek_failed")})
+                return InvocationReceipt(prepared, started, time.time(), True, result)
+            if action == "bilibili.send_danmaku":
+                result = self._ui_call(player_ui.send_danmaku, str(p.get("text") or ""))
+                if not result.get("ok"):
+                    return InvocationReceipt(prepared, started, time.time(), False,
+                                             {"error": result.get("error", "danmaku_failed")})
+                return InvocationReceipt(prepared, started, time.time(), True,
+                                         {"text": p.get("text")})
+            if action == "bilibili.next":
+                if cdp_player.available():
+                    try:
+                        with cdp_player.CdpPlayer() as cdp:
+                            result = cdp.next_episode()
+                        if result.get("ok"):
+                            return InvocationReceipt(prepared, started, time.time(), True, result)
+                    except Exception:
+                        pass
+                before = self._current_bvid()
+                # The player shortcut ] switches episode without any pixels.
+                player_ui.activate()
+                player_ui.shortcut("rightbracket")
+                time.sleep(1.5)
+                if self._current_bvid() == before:
+                    self._ui_call(player_ui.next_episode)
+                shown = before
+                deadline = time.time() + 6.0
+                while time.time() < deadline:
+                    shown = self._current_bvid()
+                    if shown and shown != before:
+                        break
+                    time.sleep(0.3)
+                return InvocationReceipt(prepared, started, time.time(),
+                                         bool(shown and shown != before),
+                                         {"before": before, "after": shown})
+            if action == "bilibili.prev":
+                if cdp_player.available():
+                    try:
+                        with cdp_player.CdpPlayer() as cdp:
+                            result = cdp.prev_episode()
+                        if result.get("ok"):
+                            return InvocationReceipt(prepared, started, time.time(), True, result)
+                    except Exception:
+                        pass
+                before_prev = self._current_bvid()
+                player_ui.activate()
+                player_ui.shortcut("leftbracket")
+                time.sleep(1.5)
+                after_prev = self._current_bvid()
+                if before_prev and after_prev and after_prev != before_prev:
+                    return InvocationReceipt(prepared, started, time.time(), True,
+                                             {"before": before_prev, "after": after_prev,
+                                              "via": "shortcut"})
+                # No public-API lookup: a multi-part video is switched through
+                # the player's own 多P上一P control (local CDP only).
+                result = player_ui.prev_episode()
+                shown = self._current_bvid()
+                return InvocationReceipt(prepared, started, time.time(),
+                                         bool(result.get("ok")) and shown != before_prev,
+                                         {"before": before_prev, "after": shown,
+                                          "via": result.get("via", "cdp")})
+                return InvocationReceipt(prepared, started, time.time(), shown == target,
+                                         {"bvid": shown, "expected": target})
             if action == "bilibili.play":
                 expected = str(p.get("video_id", ""))
                 title = p.get("title", "")

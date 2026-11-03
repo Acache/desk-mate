@@ -31,7 +31,7 @@ class MacSystemAdapter(ActionAdapter):
         caps = CapabilitySet()
         caps.available |= {"system.open_app", "system.screenshot"}
         # Volume/mute use Standard Additions; still verify at invoke time.
-        caps.available |= {"system.vol_up", "system.vol_down", "system.mute"}
+        caps.available |= {"system.vol_up", "system.vol_down", "system.volume", "system.mute"}
         return caps
 
     def _app_path(self, alias: str) -> str | None:
@@ -58,6 +58,8 @@ class MacSystemAdapter(ActionAdapter):
             return PreparedAction(resolved, {"path": path}, time.time())
         if action in {"system.vol_up", "system.vol_down"}:
             return PreparedAction(resolved, {"delta": int(resolved.params.get("delta", 5))}, time.time())
+        if action == "system.volume":
+            return PreparedAction(resolved, {"target": max(0, min(100, int(resolved.params.get("target", 50))))}, time.time())
         if action == "system.mute":
             return PreparedAction(resolved, {}, time.time())
         if action == "system.screenshot":
@@ -71,6 +73,15 @@ class MacSystemAdapter(ActionAdapter):
         try:
             if action == "system.open_app":
                 subprocess.run(["open", p["path"]], check=True, timeout=10)
+            elif action == "system.volume":
+                subprocess.run(["osascript", "-e", f"set volume output volume {p['target']}"],
+                               check=True, timeout=10, capture_output=True, text=True)
+                out = subprocess.run(["osascript", "-e", "output volume of (get volume settings)"],
+                                     capture_output=True, text=True, timeout=5)
+                p["observed"] = int(out.stdout.strip()) if out.stdout.strip().isdigit() else None
+                if p["observed"] is not None and abs(p["observed"] - p["target"]) > 2:
+                    return InvocationReceipt(prepared, started, time.time(), False,
+                                             {"error": "volume_not_applied", **p})
             elif action in {"system.vol_up", "system.vol_down", "system.mute"}:
                 script = self._volume_script(action, p.get("delta", 5))
                 subprocess.run(["osascript", "-e", script], check=True, timeout=10,

@@ -493,7 +493,9 @@ void ble_manager_poll() {
         }
     } else inactive_since=0;
     advertising(now); persist(); publish();
-    ble_voice_poll(model.view.handle,model.view.generation,ble_model_ready(&model));
+    // The voice service has its own encrypted CCCD. Tying its readiness to the
+    // HID model let an unrelated HID subscription blip tear down voice.
+    ble_voice_poll(model.view.handle,model.view.generation,model.view.handle!=BLE_NO_HANDLE);
 #ifdef DESKMATE_BLE_LAB
     ble_voice_lab_poll(model.view.handle,model.view.generation,ble_model_ready(&model));
 #endif

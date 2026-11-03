@@ -127,3 +127,14 @@ are distinct from physical speech, host switching and phone provisioning QA.
 - Inlined firmware auth/session loops can retain a 2KB RX buffer while nested serialization and BLE queue-copy functions add another 2KB each. A 10KB voice task reached READY, then faulted on a heartbeat with stack protection. Use single-owner persistent scratch buffers, preserve non-reentrant ownership, and verify task stack high-water mark on real auth/heartbeats rather than accepting compilation and protocol unit tests alone.
 - NimBLE `getPeerInfo(uint8_t)` indexes peers; use `getPeerInfoByHandle(uint16_t)` for connection handles. Do not rely on the first connection having handle0.
 - Track service-change notification generation separately from optional remote-name lookup; user-named hosts may skip the name generation update.
+
+
+## 2026-11-02 深夜 — 真实语音测试暴露的带宽与门槛问题
+
+- 真实语音失败时先量“设备读秒 vs 主机收到的音频时长”。本次 5 秒按键只有 2.4–3.8 秒到达，直接指向发送侧丢帧，而不是麦克风或模型。`pcm_ring` 有 `dropped` 计数器但从未上报，诊断时只能靠时长反推；静默丢弃的缓冲应至少可通过日志或状态接口观察。
+- 实验室峰值吞吐不是可用带宽。lab 的 31.9KB/s 没有余量，生产实测仅 21–23KB/s；设计必须按“持续速率 + 缓冲溢出语义”而不是最好成绩。原始 32KB/s 实时语音在 1.28 秒环形缓冲上必然失败。
+- 微调 ACK（逐消息→每 4 包）只把 64 包/秒提到 100 包/秒，仍不够；真正的解法是把需求降到链路能力以内（IMA ADPCM 4:1，640B→164B）。优先改数据量，再谈调度优化。
+- 逐消息 ACK 每个 GATT 写会占连接事件；批量 ACK + 控制消息立即 ACK 是正确组合。尾部必须确认，否则设备 2 秒无 ACK 会重置。
+- 有损压缩下 SHA 校验要对齐“解码后 PCM”：编码器内部本来就有重建样本，固件对重建样本做哈希即可与主机落盘文件一致，无需改 seal/commit 语义。
+- 用户纠正：不要用“按下就立刻说话”教用户迁就程序。用户会先按住再思考，程序要按最坏等待时间设计。任何“让用户改变操作习惯”的临时方案都应在下一轮被结构性修复替代。
+- 设备文案之前靠中文 summary 关键词匹配，`OUT_OF_SCOPE` 因含“搜索”被显示成 `SEARCH EXPIRED`。应让服务端下发机器可读 `code` + ASCII `detail`，设备只负责显示。

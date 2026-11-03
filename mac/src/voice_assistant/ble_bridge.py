@@ -16,6 +16,19 @@ from .ble_wire import Assembler, HEADER, MAX_MESSAGE, WINDOW, RX, TX, STATUS, SE
 from .remote_session import serve_remote_session
 log = logging.getLogger(__name__)
 
+# Acknowledgements advance the peripheral's credit window. Each GATT write
+# costs a connection event, so acknowledging every assembled message (audio
+# messages are 3 packets) stalls the sender at ~1 packet/event and silently
+# overflows its 1.28 s PCM ring. Batch four packets per ACK, as the lab
+# receiver does, and acknowledge control messages immediately for low latency.
+ACK_EVERY = 4
+# The peripheral pings every 5 s. macOS CoreBluetooth has been observed to stop
+# delivering notifications to the app for tens of seconds after a long burst
+# (audio upload), which used to tear down the session. Re-arm the subscription
+# locally before the peripheral's own keepalive watchdog gives up.
+IDLE_RECHECK_SECONDS = 7.0
+MAX_IDLE_KICKS = 4
+
 async def resolve_device(address):
     from bleak import BleakScanner
     if sys.platform == 'darwin':
@@ -46,6 +59,7 @@ class BleChannel:
         self.incoming = asyncio.Queue(maxsize=8)
         self.packets = asyncio.Queue(maxsize=64)
         self.sent = self.acked = 0
+        self.ack_seq = 0
         self.credit = asyncio.Event()
         self.credit.set()
         self.lock = asyncio.Lock()
@@ -71,10 +85,37 @@ class BleChannel:
         self.worker = asyncio.create_task(self._pump())
         await self.client.start_notify(TX, self.notification)
 
+    async def acknowledge(self):
+        await asyncio.wait_for(self.client.write_gatt_char(
+            RX, packet(3, self.epoch, self.assembler.next), response=False), 2)
+        self.ack_seq = self.assembler.next
+
+    async def _rearm_subscription(self) -> bool:
+        # Re-register without unsubscribing: a CCCD 0->1 toggle would make the
+        # peripheral treat the drop as a lost transport and restart auth.
+        try:
+            await asyncio.wait_for(self.client.start_notify(TX, self.notification), 5)
+            return True
+        except Exception:
+            return False
+
     async def _pump(self):
+        idle_kicks = 0
         try:
             while not self.closed:
-                data = await asyncio.wait_for(self.packets.get(), timeout=20)
+                try:
+                    data = await asyncio.wait_for(self.packets.get(), timeout=IDLE_RECHECK_SECONDS)
+                except asyncio.TimeoutError:
+                    if idle_kicks >= MAX_IDLE_KICKS:
+                        raise
+                    idle_kicks += 1
+                    log.warning('BLE notify stalled; re-arming subscription (%d/%d)', idle_kicks, MAX_IDLE_KICKS)
+                    # Failing to re-arm is not fatal: the peripheral retries its
+                    # own notifications, so keep the authenticated session open
+                    # and give it time to recover instead of tearing it down.
+                    await self._rearm_subscription()
+                    continue
+                idle_kicks = 0
                 if len(data) < HEADER.size:
                     raise WireError('short notification')
                 version, kind, epoch, seq, off, total, size = HEADER.unpack_from(data)
@@ -86,15 +127,20 @@ class BleChannel:
                     self.acked = seq; self.credit.set()
                     continue
                 result = self.assembler.feed(data)
-                if result is not None or self.assembler.next % 4 == 0:
-                    await asyncio.wait_for(self.client.write_gatt_char(RX, packet(3, self.epoch, self.assembler.next), response=False), 2)
+                # Control messages (hello/seal/commit/ping) are rare: ack them
+                # at once so the peripheral's tail is never left unacknowledged.
+                # Bulk audio data is acknowledged in batches of ACK_EVERY.
+                if (self.assembler.next - self.ack_seq >= ACK_EVERY
+                        or (result is not None and result[0] == 1)):
+                    await self.acknowledge()
                 if result is not None:
                     kind, payload = result
                     await asyncio.wait_for(self.incoming.put({'text': payload.decode('utf-8')} if kind == 1 else {'bytes': payload}), 2)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            log.warning('BLE channel stopped: %s', type(exc).__name__)
+            log.warning('BLE channel stopped: %s (recv=%d sent=%d acked=%d)',
+                        type(exc).__name__, self.assembler.next, self.sent, self.acked)
         finally:
             self.closed = True; self.credit.set(); self._wake_disconnect()
 

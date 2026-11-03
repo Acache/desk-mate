@@ -15,5 +15,6 @@ bool vc_transport_pending();
 void vc_transport_ack_unknown();
 uint32_t vc_transport_generation();
 const char *vc_transport_status();
+const char *vc_transport_stage();
 
 #endif

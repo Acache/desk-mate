@@ -19,6 +19,7 @@ struct VoiceUiStatus {
     float rms;
     char summary[129];
     char transport[64];
+    char stage[16];
     char command_id[37];
 };
 

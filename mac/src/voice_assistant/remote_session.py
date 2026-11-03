@@ -53,6 +53,7 @@ async def serve_remote_session(state, ws, device_id: str):
     await state.manager.attach(device_id, ws)
     hello_done = False
     active_command: str | None = None
+    active_codec = "s16le"
     last_ack = 0.0
     pending_frames = 0
     try:
@@ -70,7 +71,7 @@ async def serve_remote_session(state, ws, device_id: str):
                     await ws.send_text(_json(_error(0, ErrorCode.PROTOCOL_ERROR, "binary frame outside STAGING")))
                     continue
                 try:
-                    receipt = stages.append(active_command, data)
+                    receipt = stages.append(active_command, data, active_codec)
                 except (SessionError, Exception) as exc:
                     code = getattr(exc, "code", ErrorCode.AUDIO_INVALID)
                     if not isinstance(code, ErrorCode):
@@ -204,6 +205,7 @@ async def serve_remote_session(state, ws, device_id: str):
                     await ws.send_text(_json(_error(parsed.msg_id, code, str(exc)[:128])))
                     continue
                 active_command = str(parsed.command_id)
+                active_codec = parsed.codec
                 last_ack = time.time()
                 await ws.send_text(_json(BeginAck(
                     msg_id=parsed.msg_id, in_reply_to=parsed.msg_id,
@@ -255,6 +257,13 @@ async def serve_remote_session(state, ws, device_id: str):
                     command_id=parsed.command_id, frame_count=row["frame_count"],
                     pcm_bytes=row["pcm_bytes"], sha256=row["pcm_sha256"],
                 )))
+                if getattr(state, "early_stt", None) is not None and getattr(state, "stt", None) is not None:
+                    try:
+                        staging = cfg.staging_dir / f"{active_command}.wav"
+                        state.early_stt[active_command] = asyncio.create_task(
+                            asyncio.to_thread(state.stt.transcribe, staging, time.time() + 120))
+                    except Exception as exc:  # noqa: BLE001 - early start is best effort
+                        log.warning("early STT start failed: %s", exc)
                 continue
             if isinstance(parsed, contracts.Commit):
                 if not active_command or str(parsed.command_id) != active_command:
@@ -294,6 +303,9 @@ async def serve_remote_session(state, ws, device_id: str):
                     continue
                 if active_command == str(parsed.command_id):
                     active_command = None
+                early = (getattr(state, "early_stt", None) or {}).pop(str(parsed.command_id), None)
+                if early is not None:
+                    early.cancel()
                 await ws.send_text(_json(CancelAck(
                     msg_id=parsed.msg_id, in_reply_to=parsed.msg_id,
                     command_id=parsed.command_id, state=st, outcome=CancelOutcome(outcome),
