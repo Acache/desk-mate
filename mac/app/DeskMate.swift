@@ -11,6 +11,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var supervisor: Process?
     var timer: Timer?
     var lastState: [String: Any] = [:]
+    var mainWindow: MainWindowController?
     var stopping = false
     var terminating = false
     var busy = false
@@ -69,6 +70,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         rebuildMenu()
         start()
+        if CommandLine.arguments.contains("--show-window") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in self?.showWindow() }
+        }
         timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in self?.refresh() }
     }
 
@@ -91,6 +95,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         p.currentDirectoryURL = root
         p.standardInput = FileHandle.nullDevice
         return p
+    }
+
+    @objc func showWindow() {
+        if mainWindow == nil { mainWindow = MainWindowController(delegate: self) }
+        mainWindow?.update()
+        mainWindow?.show()
     }
 
     @objc func start() {
@@ -143,6 +153,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         else { label = labels[phase] ?? phase }
         statusItem.button?.toolTip = "Desk-Mate · \(label)"
         rebuildMenu()
+        mainWindow?.update()
         if !busy && !stopping { reportConnectionState() }
     }
 
@@ -213,6 +224,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(item("B站本地控制：\(cdpReady ? (playerReady ? "播放器已连接" : "已启用，请打开视频") : "未启用")", nil, enabled: false))
         if busy { menu.addItem(item(operationText,nil,enabled:false)) }
         else if pendingDevice != nil { menu.addItem(item("正在连接新设备，等待认证结果…",nil,enabled:false)) }
+        menu.addItem(.separator())
+        let openItem = item("打开主窗口…", #selector(showWindow))
+        openItem.keyEquivalent = "o"
+        menu.addItem(openItem)
         menu.addItem(.separator())
         menu.addItem(item("启动服务", #selector(start), enabled: supervisor == nil && !stopping))
         menu.addItem(item("停止服务", #selector(stop), enabled: supervisor != nil && !stopping))
@@ -445,3 +460,118 @@ if CommandLine.arguments.contains("--self-check") {
 app.delegate = delegate
 app.setActivationPolicy(.accessory)
 app.run()
+
+
+/// A real settings window instead of a menu-only UI. It reads the same
+/// ``lastState`` the status menu uses and rebuilds itself on every refresh.
+final class MainWindowController: NSObject, NSWindowDelegate {
+    weak var delegate: AppDelegate?
+    private let window: NSWindow
+    private let stack = NSStackView()
+
+    init(delegate: AppDelegate) {
+        self.delegate = delegate
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 600),
+                          styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                          backing: .buffered, defer: false)
+        super.init()
+        window.title = "Desk-Mate"
+        window.isReleasedWhenClosed = false
+        window.delegate = self
+        window.center()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 10
+        stack.edgeInsets = NSEdgeInsets(top: 18, left: 18, bottom: 18, right: 18)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        let host = NSView()
+        host.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.topAnchor.constraint(equalTo: host.topAnchor),
+            stack.leadingAnchor.constraint(equalTo: host.leadingAnchor),
+            stack.trailingAnchor.constraint(lessThanOrEqualTo: host.trailingAnchor),
+        ])
+        window.contentView = host
+    }
+
+    func show() {
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    func windowWillClose(_ notification: Notification) {}
+
+    private func label(_ text: String, size: CGFloat = 13, bold: Bool = false, color: NSColor = .labelColor) -> NSTextField {
+        let field = NSTextField(labelWithString: text)
+        field.font = bold ? NSFont.boldSystemFont(ofSize: size) : NSFont.systemFont(ofSize: size)
+        field.textColor = color
+        return field
+    }
+
+    private func button(_ title: String, _ action: Selector, enabled: Bool = true) -> NSButton {
+        let b = NSButton(title: title, target: delegate, action: action)
+        b.bezelStyle = .rounded
+        b.isEnabled = enabled
+        return b
+    }
+
+    private func row(_ views: [NSView]) -> NSStackView {
+        let r = NSStackView(views: views)
+        r.orientation = .horizontal
+        r.spacing = 8
+        r.alignment = .centerY
+        return r
+    }
+
+    func update() {
+        guard let d = delegate else { return }
+        stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        let health = d.lastState["health"] as? [String: Any] ?? [:]
+        let ble = health["ble"] as? [String: Any] ?? [:]
+        let stt = health["stt"] as? [String: Any] ?? [:]
+        let model = health["decision"] as? [String: Any] ?? [:]
+        let cdp = health["cdp"] as? [String: Any] ?? [:]
+        let phase = d.lastState["phase"] as? String ?? "starting"
+
+        stack.addArrangedSubview(label("Desk-Mate", size: 20, bold: true))
+        stack.addArrangedSubview(label("本地语音控制台 · 服务 \(d.supervisor != nil ? "运行中" : "已停止")（\(phase)）", color: .secondaryLabelColor))
+
+        stack.addArrangedSubview(label("服务", bold: true))
+        stack.addArrangedSubview(row([button("启动服务", #selector(AppDelegate.start), enabled: d.supervisor == nil),
+                                      button("停止服务", #selector(AppDelegate.stop), enabled: d.supervisor != nil),
+                                      button("诊断状态…", #selector(AppDelegate.diagnostics)),
+                                      button("打开日志", #selector(AppDelegate.logs))]))
+
+        stack.addArrangedSubview(label("蓝牙语音输入", bold: true))
+        let device = (ble["device_name"] as? String) ?? (ble["address"] as? String) ?? "未选择"
+        stack.addArrangedSubview(label("阶段：\(d.bleLabel(ble["phase"] as? String ?? "disabled")) · 设备：\(device)"))
+        stack.addArrangedSubview(row([button("选择或切换蓝牙输入…", #selector(AppDelegate.selectDevice)),
+                                      button("断开蓝牙输入", #selector(AppDelegate.disconnectDevice)),
+                                      button("通过 USB 授权设备…", #selector(AppDelegate.pairDevice))]))
+
+        stack.addArrangedSubview(label("B 站本地控制", bold: true))
+        let cdpReady = cdp["cdp_ready"] as? Bool == true
+        let playerReady = cdp["player_available"] as? Bool == true
+        stack.addArrangedSubview(label(cdpReady ? (playerReady ? "本地控制已连接（播放器在线）" : "本地控制已启用，请打开视频") : "未启用本地控制"))
+        stack.addArrangedSubview(row([button("打开 B 站并启用本地控制…", #selector(AppDelegate.enableCDP))]))
+
+        stack.addArrangedSubview(label("语音识别 / 决策模型", bold: true))
+        stack.addArrangedSubview(label("语音识别：\(stt["available"] as? Bool == true ? "已就绪" : "尚未就绪") · 决策模型：\(model["model_loaded"] as? Bool == true ? "已加载" : "尚未加载")"))
+
+        stack.addArrangedSubview(label("权限", bold: true))
+        stack.addArrangedSubview(label("辅助功能：\(AXIsProcessTrusted() ? "已授权" : "未授权") · 屏幕录制：\(CGPreflightScreenCaptureAccess() ? "已授权" : "未授权")"))
+        stack.addArrangedSubview(row([button("辅助功能…", #selector(AppDelegate.openAccessibilityPane)),
+                                      button("屏幕录制…", #selector(AppDelegate.openScreenPane)),
+                                      button("蓝牙…", #selector(AppDelegate.openBluetoothPane)),
+                                      button("麦克风…", #selector(AppDelegate.openMicrophonePane))]))
+
+        stack.addArrangedSubview(label("诊断与数据", bold: true))
+        stack.addArrangedSubview(row([button("导出诊断…", #selector(AppDelegate.exportDiagnostics)),
+                                      button("权限说明…", #selector(AppDelegate.permissions))]))
+        if let error = d.lastState["error"] as? String, !error.isEmpty {
+            stack.addArrangedSubview(label("最近错误：\(error)", color: .systemRed))
+        }
+        stack.addArrangedSubview(label("数据目录：\(d.root.path)", size: 11, color: .secondaryLabelColor))
+        stack.addArrangedSubview(label("日志中可能包含语音转写，分享前请自行检查。", size: 11, color: .secondaryLabelColor))
+    }
+}
