@@ -166,7 +166,11 @@ class BleChannel:
                 wire = packet(kind, self.epoch, self.sent, off, len(data), chunk)
                 # Reserve the sequence before the platform yields to callbacks.
                 self.sent += 1
-                await asyncio.wait_for(self.client.write_gatt_char(RX, wire, response=False), 2)
+                # Control messages (auth) use write-with-response so the
+                # device is guaranteed to see the handshake; data keeps the
+                # fast no-response path.
+                await asyncio.wait_for(self.client.write_gatt_char(
+                    RX, wire, response=(kind == 1)), 2)
 
     async def send_text(self, text):
         await self.send(1, text.encode('utf-8'))

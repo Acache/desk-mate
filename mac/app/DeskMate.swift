@@ -371,6 +371,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    @objc func resetPermissions() {
+        // Ad-hoc signed builds change their cdhash on every rebuild, so a grant
+        // from an earlier build no longer applies. Clear the stale TCC record
+        // for this bundle id and let macOS prompt for the running copy.
+        for service in ["Accessibility", "ScreenCapture"] {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/usr/bin/tccutil")
+            p.arguments = ["reset", service, "com.desk-mate.server"]
+            try? p.run()
+            p.waitUntilExit()
+        }
+        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+        _ = AXIsProcessTrustedWithOptions(options)
+        mainWindow?.update()
+    }
+
     @objc func recheckPermissions() {
         let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
         _ = AXIsProcessTrustedWithOptions(options)
@@ -509,6 +525,20 @@ final class MainWindowController: NSObject, NSWindowDelegate {
 
     func windowWillClose(_ notification: Notification) {}
 
+    static func cdhash() -> String {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
+        p.arguments = ["-dvvv", Bundle.main.executablePath ?? ""]
+        let pipe = Pipe(); p.standardError = pipe
+        try? p.run(); p.waitUntilExit()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let text = String(data: data, encoding: .utf8) ?? ""
+        for line in text.split(separator: "\n") where line.hasPrefix("CDHash=") {
+            return String(line).replacingOccurrences(of: "CDHash=", with: "")
+        }
+        return "未知"
+    }
+
     private func label(_ text: String, size: CGFloat = 13, bold: Bool = false, color: NSColor = .labelColor) -> NSTextField {
         let field = NSTextField(labelWithString: text)
         field.font = bold ? NSFont.boldSystemFont(ofSize: size) : NSFont.systemFont(ofSize: size)
@@ -578,12 +608,14 @@ final class MainWindowController: NSObject, NSWindowDelegate {
         }
         stack.addArrangedSubview(label("辅助功能：\(ax ? "已授权" : "未授权") · 屏幕录制：\(screen ? "已授权" : "未授权") · 蓝牙：\(bt)"))
         stack.addArrangedSubview(label("当前运行的程序：\(Bundle.main.bundlePath)", size: 11, color: .secondaryLabelColor))
-        stack.addArrangedSubview(label("如在系统设置中已授权但仍显示未授权：请先退出本 App 再重新打开；系统按程序签名记录授权。",
+        stack.addArrangedSubview(label("签名：\(Self.cdhash())（本机为 ad-hoc 签名，重新打包后哈希会变）", size: 11, color: .secondaryLabelColor))
+        stack.addArrangedSubview(label("系统按这个哈希记录授权。若系统里显示已勾选、这里仍是未授权，说明勾选的是旧版本：先点「重置并重新授权」，再在系统设置里勾选当前程序，然后退出重开 App。",
                                        size: 11, color: .secondaryLabelColor))
         stack.addArrangedSubview(row([button("辅助功能…", #selector(AppDelegate.openAccessibilityPane)),
                                       button("屏幕录制…", #selector(AppDelegate.openScreenPane)),
                                       button("蓝牙…", #selector(AppDelegate.openBluetoothPane)),
-                                      button("重新检测", #selector(AppDelegate.recheckPermissions))]))
+                                      button("重新检测", #selector(AppDelegate.recheckPermissions)),
+                                      button("重置并重新授权", #selector(AppDelegate.resetPermissions))]))
 
         stack.addArrangedSubview(label("诊断与数据", bold: true))
         stack.addArrangedSubview(row([button("导出诊断…", #selector(AppDelegate.exportDiagnostics)),

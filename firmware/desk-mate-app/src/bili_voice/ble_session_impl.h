@@ -42,7 +42,17 @@ static void poll_ble_session(){
  for(int n=0;n<4&&ble_voice_receive(&message);n++){
   if(message.epoch!=link.epoch)continue;
   if(message.kind!=1){bv_fail("BLE_PROTOCOL_ERROR");return;}
-  if(bv_phase==3&&s_connected){handle_text((const char*)message.bytes,message.length);continue;}
+  /* A host restart re-authenticates on a link the device still considers
+   * authenticated. Detect ble_auth_start before routing the packet to the
+   * command handler, otherwise the new host's handshake is swallowed and the
+   * connection times out forever. */
+  bool wants_auth=false;
+  {
+   char probe[32];size_t n=message.length<31?message.length:31;
+   memcpy(probe,message.bytes,n);probe[n]=0;
+   wants_auth=strstr(probe,"ble_auth_start")!=nullptr;
+  }
+  if(bv_phase==3&&s_connected&&!wants_auth){handle_text((const char*)message.bytes,message.length);continue;}
   JsonDocument doc;if(deserializeJson(doc,message.bytes,message.length)){bv_fail("BLE_AUTH_FAILED");return;}
   const char*type=doc["type"]|"";
   if(!strcmp(type,"ble_auth_start")){
