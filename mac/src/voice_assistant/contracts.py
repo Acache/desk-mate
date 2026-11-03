@@ -996,6 +996,9 @@ class TrustedContext(_Strict):
     search_snapshot: Union[SearchSnapshot, None] = None
     player_snapshot: Union[PlayerSnapshot, None] = None
     recent_commands: list[dict[str, Any]] = Field(default_factory=list, max_length=10)
+    # What is on screen right now (page type + visible video lists), read from
+    # the local CDP session. Never persisted; only used to build model prompts.
+    page_context: Union[dict[str, Any], None] = None
 
 
 # ---------------------------------------------------------------------------

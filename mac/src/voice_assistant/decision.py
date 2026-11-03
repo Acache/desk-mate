@@ -150,6 +150,15 @@ def _context_payload(context: TrustedContext, transcript: str = "") -> dict[str,
                 for r in search.results[:50]
             ],
         }
+    page = getattr(context, "page_context", None)
+    if page:
+        def brief(items):
+            return [{"i": i + 1, "video_id": str(x.get("bvid") or ""),
+                     "title": str(x.get("title") or "")[:60]} for i, x in enumerate((items or [])[:12])]
+        payload["page"] = {"type": str(page.get("page") or "other"),
+                           "search_results": brief(page.get("search_results")),
+                           "episodes": brief(page.get("episodes")),
+                           "recommendations": brief(page.get("recommendations"))}
     payload["recent"] = [
         {"state": r.get("state"), "summary": str(r.get("summary") or "")[:160]}
         for r in context.recent_commands[:3]

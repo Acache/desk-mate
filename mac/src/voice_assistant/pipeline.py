@@ -362,6 +362,7 @@ class Pipeline:
                 except Exception:
                     page = None
                 if page:
+                    context.page_context = page
                     from .context_rules import PageContext, resolve as resolve_context
 
                     decision = resolve_context(transcript.normalized_text, PageContext(
