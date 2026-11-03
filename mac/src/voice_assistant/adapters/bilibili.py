@@ -205,6 +205,7 @@ class BilibiliAdapter(ActionAdapter):
                 "bilibili.search", "bilibili.play", "bilibili.pause", "bilibili.resume",
                 "bilibili.like", "bilibili.coin", "bilibili.favorite", "bilibili.comments",
                 "bilibili.seek", "bilibili.send_danmaku", "bilibili.next", "bilibili.prev",
+                "bilibili.home",
             }
         else:
             for action in ("bilibili.search", "bilibili.play", "bilibili.pause", "bilibili.resume"):
@@ -807,6 +808,7 @@ class BilibiliAdapter(ActionAdapter):
         if action in {
             "bilibili.like", "bilibili.coin", "bilibili.favorite", "bilibili.comments",
             "bilibili.seek", "bilibili.send_danmaku", "bilibili.next", "bilibili.prev",
+            "bilibili.home",
         }:
             return PreparedAction(resolved, dict(resolved.params), now)
         if action == "bilibili.play":
@@ -915,6 +917,13 @@ class BilibiliAdapter(ActionAdapter):
                                              {"error": result.get("error", "danmaku_failed")})
                 return InvocationReceipt(prepared, started, time.time(), True,
                                          {"text": p.get("text")})
+            if action == "bilibili.home":
+                before = self._current_bvid()
+                self._home()
+                time.sleep(0.8)
+                after = self._current_bvid()
+                return InvocationReceipt(prepared, started, time.time(), after is None,
+                                         {"before": before, "after": after})
             if action == "bilibili.next":
                 if cdp_player.available():
                     try:

@@ -45,6 +45,7 @@ R1_ACTIONS: tuple[str, ...] = (
 R2_ACTIONS: tuple[str, ...] = (
     "bilibili.next",
     "bilibili.prev",
+    "bilibili.home",
     "bilibili.favorite",
     "bilibili.like",
     "bilibili.coin",
@@ -74,6 +75,7 @@ ENABLED_ACTIONS: tuple[str, ...] = R1_ACTIONS + (
     "bilibili.send_danmaku",
     "bilibili.next",
     "bilibili.prev",
+    "bilibili.home",
     "system.vol_up",
     "system.vol_down",
     "system.volume",
@@ -768,6 +770,7 @@ ACTION_PARAM_TYPES: dict[str, type[_Params]] = {
     "bilibili.resume": EmptyParams,
     "bilibili.next": EmptyParams,
     "bilibili.prev": EmptyParams,
+    "bilibili.home": EmptyParams,
     "bilibili.favorite": _Params,  # optional video_id handled separately
     "bilibili.like": _Params,
     "bilibili.history": EmptyParams,

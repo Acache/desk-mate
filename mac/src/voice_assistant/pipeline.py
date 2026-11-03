@@ -92,9 +92,17 @@ _ACTION_DETAIL = {
     "bilibili.send_danmaku": "DANMAKU SENT",
     "bilibili.next": "NEXT EPISODE",
     "bilibili.prev": "PREV EPISODE",
+    "bilibili.home": "HOME",
     "system.vol_up": "VOLUME UP",
     "system.vol_down": "VOLUME DOWN",
     "system.volume": "VOLUME SET",
+}
+
+
+PLAYER_RELATIVE_ACTIONS = {
+    "bilibili.pause", "bilibili.resume", "bilibili.like", "bilibili.coin",
+    "bilibili.favorite", "bilibili.comments", "bilibili.seek",
+    "bilibili.send_danmaku", "bilibili.next", "bilibili.prev",
 }
 
 
@@ -339,20 +347,22 @@ class Pipeline:
             self.ctx.db.transition(command_id, CommandState.PLANNING)
             await notify(Progress(msg_id=0, command_id=UUID(command_id), stage="planning", step_index=None))
             t_refresh0 = time.perf_counter()
-            if self.ctx.refresh_player and any(
-                k in transcript.normalized_text
-                for k in ("暂停", "继续", "恢复", "点赞", "投币", "收藏", "弹幕", "评论",
-                          "快进", "后退", "上一集", "下一集", "上集", "下集")
-            ):
-                try:
-                    await asyncio.to_thread(self.ctx.refresh_player)
-                except Exception:
-                    pass
-            t_refresh = time.perf_counter()
             context = self._context(command_id)
             # Prefer the deterministic R1 grammar for clear commands. The LLM
             # must not add an unspoken search/play action to "打开B站".
             proposal = rule_based_proposal(transcript.normalized_text, context)
+            # Refresh the player snapshot by *action*, not by Chinese keywords:
+            # "点个赞" never contains "点赞" and used to fail with TARGET_STALE.
+            needs_player = proposal is None or any(
+                a.action in PLAYER_RELATIVE_ACTIONS for a in proposal.actions
+            )
+            if self.ctx.refresh_player and needs_player:
+                try:
+                    await asyncio.to_thread(self.ctx.refresh_player)
+                except Exception:
+                    pass
+                context = self._context(command_id)
+            t_refresh = time.perf_counter()
             route = "rules"
             if proposal is None and self.ctx.personalizer is not None and personalization_candidate(transcript.normalized_text):
                 route = "personalizer"

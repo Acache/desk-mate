@@ -14,14 +14,35 @@ from difflib import SequenceMatcher
 _KEYWORDS = ("打开", "搜索", "搜", "播放", "暂停", "继续", "恢复", "点击", "停",
              "点赞", "投币", "收藏", "弹幕", "评论", "快进", "后退", "回退", "倒退",
              "音量", "声音", "下一集", "下集", "上一集", "上集", "币",
-             "小声", "大声", "接着播", "接着放", "往后", "往前", "收起来", "太吵", "跳到", "点个赞", "b站", "哔哩哔哩")
+             "小声", "大声", "接着播", "接着放", "往后", "往前", "收起来", "太吵", "跳到", "点个赞", "b站", "哔哩哔哩",
+             "关闭", "关掉", "关视频", "静音", "点开", "观看", "回主页", "回到主界面", "回到首页", "返回主界面",
+             "上一p", "下一p")
 _PUNCT = re.compile(r"[\s，。！？、,.!?;；:：\-—_（）()\[\]【】\"'“”‘’]+")
 
 
 _VOICE_ALIASES = {
     "听一下": "停一下",
     "听下": "停下",
+    # STT homophones: the client says "上一P/下一P" and ASR writes 批/排.
+    "上一批": "上一p",
+    "下一批": "下一p",
+    "上批": "上一p",
+    "下批": "下一p",
+    "上一排": "上一p",
+    "下一排": "下一p",
+    "上一个视频": "上一p",
+    "下一个视频": "下一p",
+    "上p": "上一p",
+    "下p": "下一p",
 }
+
+# Trailing/inner sentence punctuation ASR likes to append; payloads keep their
+# words but never the sentence mark.
+_PAYLOAD_STRIP = " \t\r\n，。,.!！?？;；:：、"
+
+
+def clean_payload(value: str) -> str:
+    return (value or "").strip(_PAYLOAD_STRIP)
 
 
 def normalize_intent_text(text: str) -> str:
@@ -210,24 +231,32 @@ def rule_based_proposal(text: str, context=None) -> "DecisionProposal | None":
     if re.fullmatch(r"(?:不要|别|先别)(?:打开b站|搜索|播放|暂停|继续|恢复|点赞|投币|收藏)(?:这个视频|视频|了)?", t):
         return _out_of_scope("已取消，不会执行该动作")
 
+    # Close the current video and go home; mute; these are unambiguous.
+    if re.fullmatch(r"(?:关闭|关掉|关)(?:这个|当前)?(?:视频|播放|播放器)?", t) or re.fullmatch(
+        r"(?:回到|返回|回)?(?:主界面|主页|首页)", t
+    ):
+        return _ok([("bilibili.home", {}, [])])
+    if re.fullmatch(r"(?:静音|关声音|关闭声音|声音关掉)", t):
+        return _ok([("system.mute", {}, [])])
+
     # Preserve literal content; action words inside a payload are not commands.
     literal = text.strip()
     dm = re.fullmatch(r"(?:请|帮我)?(?:发送|发)(?:一条|个|条)?弹幕[\s：:,，]*(.+)", literal)
     if dm:
-        payload = dm.group(1).strip()
+        payload = clean_payload(dm.group(1))
         if len(payload) > 30:
             return _clarify("弹幕最多30个字，请缩短后重试")
         return _ok([("bilibili.send_danmaku", {"text": payload}, [])])
     search_only = re.fullmatch(r"(?:请|麻烦|帮我)?(?:搜索|搜)(.+)", literal)
     canonical_search_play = re.fullmatch(r"(?:搜索|搜).+?(?:然后|并|再)?播放第[0-9一二三四五六七八九十]+个(?:视频)?", t)
     if search_only and not re.search(r"然后|顺便|同时|并且|再(?:播放|点赞|收藏)|播放第", search_only.group(1)):
-        return _ok([("bilibili.search", {"query": search_only.group(1).strip()}, [])])
+        return _ok([("bilibili.search", {"query": clean_payload(search_only.group(1))}, [])])
     if is_semantic_request(text) and not canonical_search_play:
         return None
 
     folder_match = re.fullmatch(r"(?:请|帮我|麻烦|这个|那个)*收藏(?:到|至|进|在)(.+?)(?:收藏夹|文件夹|里|中)?[。]?$",literal)
     if folder_match:
-        folder = folder_match.group(1).strip()
+        folder = clean_payload(folder_match.group(1))
         if len(folder) > 32:
             return _clarify("文件夹名最多32个字，请缩短后重试")
         return _ok([("bilibili.favorite", {"folder":folder}, [])])
@@ -265,9 +294,9 @@ def rule_based_proposal(text: str, context=None) -> "DecisionProposal | None":
         if mm and _cn_number(mm.group(1)) is not None:
             return _ok([("bilibili.seek", {"delta_s": -_cn_number(mm.group(1))}, [])])
         return _clarify("请说快进多少秒，或快进到几分几秒")
-    if t in ("下一集", "下集"):
+    if t in ("下一集", "下集", "下一p"):
         return _ok([("bilibili.next", {}, [])])
-    if t in ("上一集", "上集"):
+    if t in ("上一集", "上集", "上一p"):
         return _ok([("bilibili.prev", {}, [])])
     if re.fullmatch(r"(?:音量|声音)(?:调|调到|调成)?(?:大|高|响|小|低|轻|百分之[0-9零一二三四五六七八九十百两]+|[0-9]+%)", t):
         vm = re.search(r"百分之([0-9零一二三四五六七八九十百两]+)", t)

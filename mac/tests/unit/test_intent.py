@@ -33,12 +33,13 @@ def test_literal_payload_is_not_parsed_as_an_action_word():
     from voice_assistant.intent import rule_based_proposal
     p = rule_based_proposal("发送弹幕 Hello, 别忘了点赞！")
     assert p.actions[0].action == "bilibili.send_danmaku"
-    assert p.actions[0].params["text"] == "Hello, 别忘了点赞！"
+    # Trailing sentence punctuation belongs to the sentence, not the payload.
+    assert p.actions[0].params["text"] == "Hello, 别忘了点赞"
     p = rule_based_proposal("搜索如何收藏视频")
     assert p.actions[0].action == "bilibili.search"
     assert p.actions[0].params["query"] == "如何收藏视频"
     assert rule_based_proposal("发送弹幕 " + "字"*31).status.value == "clarify_needed"
-    assert rule_based_proposal("发送弹幕 Hello。").actions[0].params["text"] == "Hello。"
+    assert rule_based_proposal("发送弹幕 Hello。").actions[0].params["text"] == "Hello"
     assert rule_based_proposal("收藏到 My Work 文件夹").actions[0].params["folder"] == "My Work"
     assert rule_based_proposal("收藏到"+"字"*33).status.value == "clarify_needed"
 
@@ -255,3 +256,26 @@ def test_row_synonym_does_not_fall_back_to_ordinal():
     p = rule_based_proposal("点击第三行第一个视频", _ctx())
     assert p is not None and not p.actions
     assert "搜索" in p.clarification
+
+
+def test_close_home_mute_and_p_aliases():
+    from voice_assistant.intent import rule_based_proposal
+    for text in ("关闭。", "关闭这个视频。", "关掉这个视频。", "回到主界面。", "回主页。"):
+        p = rule_based_proposal(text)
+        assert p is not None and p.actions[0].action == "bilibili.home", text
+    p = rule_based_proposal("静音。")
+    assert p is not None and p.actions[0].action == "system.mute"
+    # ASR hears "上一P" as 上一批/上一排/上一个视频; all normalise to prev.
+    for text in ("上一批。", "上一排。", "上一个视频。", "上P。"):
+        p = rule_based_proposal(text)
+        assert p is not None and p.actions[0].action == "bilibili.prev", text
+    for text in ("下一批。", "下一个视频。"):
+        p = rule_based_proposal(text)
+        assert p is not None and p.actions[0].action == "bilibili.next", text
+
+
+def test_search_and_danmaku_strip_trailing_punctuation():
+    from voice_assistant.intent import rule_based_proposal
+    assert rule_based_proposal("搜索猫咪。").actions[0].params["query"] == "猫咪"
+    assert rule_based_proposal("搜索猫咪.").actions[0].params["query"] == "猫咪"
+    assert rule_based_proposal("发个弹幕说的好。").actions[0].params["text"] == "说的好"
