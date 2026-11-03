@@ -101,6 +101,10 @@ class BleChannel:
 
     async def _pump(self):
         idle_kicks = 0
+        # Cumulative re-arms on this channel. Stray status packets used to reset
+        # idle_kicks forever, leaving auth stuck on a half-armed subscription;
+        # after a few rounds force a reconnect (fresh subscription + epoch).
+        rearms = 0
         try:
             while not self.closed:
                 try:
@@ -109,7 +113,11 @@ class BleChannel:
                     if idle_kicks >= MAX_IDLE_KICKS:
                         raise
                     idle_kicks += 1
-                    log.warning('BLE notify stalled; re-arming subscription (%d/%d)', idle_kicks, MAX_IDLE_KICKS)
+                    rearms += 1
+                    if rearms > 6:
+                        raise WireError('notify stalled repeatedly; reconnect')
+                    log.warning('BLE notify stalled; re-arming subscription (%d/%d, total %d)',
+                                idle_kicks, MAX_IDLE_KICKS, rearms)
                     # Failing to re-arm is not fatal: the peripheral retries its
                     # own notifications, so keep the authenticated session open
                     # and give it time to recover instead of tearing it down.
@@ -219,7 +227,7 @@ def connection_error(exc,phase):
     if any(word in message for word in ("powered off","poweredoff","bluetooth is off")):
         return {"error_code":"BLUETOOTH_OFF","message":"Mac 蓝牙已关闭","hint":"打开系统蓝牙后会自动重试"}
     if isinstance(exc,(TimeoutError,asyncio.TimeoutError)):
-        return {"error_code":"BLE_TIMEOUT","message":"设备连接或认证超时","hint":"保持设备唤醒并靠近 Mac，在第2屏连接这台 Mac；首次使用请先通过 USB 授权"}
+        return {"error_code":"BLE_TIMEOUT","message":"设备连接或认证超时，正在自动重连","hint":"保持设备唤醒并靠近 Mac；持续失败时在设备第2屏重新点击连接这台 Mac（已授权设备无需再次 USB 授权）"}
     return {"error_code":"BLE_CONNECTION_FAILED","message":"蓝牙连接暂时失败，正在重试","hint":"检查设备电源、距离和第2屏连接；详细信息可在诊断中查看"}
 
 

@@ -14,6 +14,8 @@ static String bv_proof(const char*role){
 static bool bv_equal(const char*a,const String&b){if(strlen(a)!=b.length())return false;uint8_t diff=0;for(size_t i=0;i<b.length();i++)diff|=a[i]^b[i];return diff==0;}
 static void bv_clear_auth(){bv_phase=0;bv_slot=-1;bv_candidate.reset();bv_transcript="";memset(bv_key,0,sizeof(bv_key));}
 static void bv_fail(const char*status){bv_clear_auth();host_disconnect();set_status(status);}
+/* Keep the link: a retried ble_auth_start can start a fresh handshake. */
+static void bv_soft_reset(const char*status){bv_clear_auth();set_status(status);}
 static void poll_ble_session(){
  BvLink link;ble_voice_link(&link);
  // A changed epoch means the BLE session really restarted (new connection or a
@@ -34,7 +36,7 @@ static void poll_ble_session(){
   set_status("CONNECT_BLUETOOTH");return;
  }
  if(s_paused){set_status("PAUSED");return;}
- if(bv_phase&&bv_phase<3&&(int32_t)(millis()-bv_deadline)>=0){bv_fail("BLE_AUTH_TIMEOUT");return;}
+ if(bv_phase&&bv_phase<3&&(int32_t)(millis()-bv_deadline)>=0){bv_soft_reset("BLE_AUTH_TIMEOUT");return;}
  // Owned only by the transport task; auth and nested reply writes must not stack 2KB buffers.
  static BvMessage message;
  for(int n=0;n<4&&ble_voice_receive(&message);n++){
@@ -43,7 +45,11 @@ static void poll_ble_session(){
   if(bv_phase==3&&s_connected){handle_text((const char*)message.bytes,message.length);continue;}
   JsonDocument doc;if(deserializeJson(doc,message.bytes,message.length)){bv_fail("BLE_AUTH_FAILED");return;}
   const char*type=doc["type"]|"";
-  if(!strcmp(type,"ble_auth_start")&&bv_phase==0){
+  if(!strcmp(type,"ble_auth_start")){
+   /* A host that lost the challenge (BLE notify drop) must be able to restart
+    * the handshake at any phase; re-authenticating a live session is also
+    * allowed because the host only does this on a fresh channel. */
+   bv_clear_auth();
    const char*id=doc["server_id"]|"",*host_nonce=doc["nonce"]|"";
    int slot=vh_find(&s_hosts,id);char binding[37];
    if(slot<0||!bv_nonce(host_nonce)||(s_pending&&strcmp(s_ts.pending.server_id,id))||
