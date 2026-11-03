@@ -778,6 +778,18 @@ class BilibiliAdapter(ActionAdapter):
         try:
             if not self.app_running():
                 return None
+            # CDP answers pause state in milliseconds; use it before any AX
+            # round-trip (the AX refresh cost ~1.3 s on the packaged app).
+            if cdp_player.available():
+                try:
+                    with cdp_player.CdpPlayer() as cdp:
+                        state = cdp.state()
+                    match = re.search(r"bvid=(BV[0-9A-Za-z]{10})", str(state.get("href") or ""))
+                    paused = state.get("paused")
+                    if match and isinstance(paused, bool):
+                        return self._save_player(match.group(1), paused)
+                except Exception:
+                    pass
             self._daemon_request("refresh", timeout=4)
             fast = self._player_snapshot_fast(stable=True)
             if fast is not None:
