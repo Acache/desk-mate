@@ -48,3 +48,17 @@ mac/bin/
 
 # 本地归档：原始对话记录（含个人信息，不入库）
 docs/archive/bili-chat-log-*.md
+
+# ---- 模型 / 分发包（绝不入库，仓库要同步到社区）----
+*.gguf
+*.safetensors
+*.onnx
+*.pt
+*.pth
+*.ckpt
+*.dmg
+*.zip
+*.pkg
+*.app/
+models/
+ollama-models/
