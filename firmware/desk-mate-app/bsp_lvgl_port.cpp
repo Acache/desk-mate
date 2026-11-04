@@ -6,6 +6,7 @@
 #include "src/externLib/esp_lcd_sh8601.h"
 #include "user_config.h"
 #include "lcd_touch.h"
+#include "idle_brightness.h"
 #include "./src/port_bsp/axp2101_bsp.h"
 
 static esp_lcd_panel_handle_t panel_handle = NULL;
@@ -19,6 +20,12 @@ static SemaphoreHandle_t lvgl_mux = NULL;
 LcdTouchPanel *touch_dev = NULL;
 
 static uint8_t brightness_ = 100;
+static IdleBrightness idle_brightness;
+
+void bsp_display_activity(void) {
+  idle_brightness_activity(&idle_brightness, lv_tick_get());
+  if (brightness_ != 100) Lcd_SetBacklight(100);
+}
 
 #define LCD_BIT_PER_PIXEL (16)
 
@@ -94,6 +101,10 @@ static void lvgl_port_task(void *arg) {
   while (1) {
     if (bsp_lvgl_lock(0)) {
       task_delay_ms = lv_timer_handler();
+      uint8_t level = idle_brightness_level(&idle_brightness, lv_tick_get());
+      if (level != brightness_) Lcd_SetBacklight(level);
+      // Keep the fade smooth even when a page has no active UI timers.
+      if (task_delay_ms > 20) task_delay_ms = 20;
       bsp_lvgl_unlock();
     }
     if (task_delay_ms > LVGL_TASK_MAX_DELAY_MS) {
@@ -106,9 +117,12 @@ static void lvgl_port_task(void *arg) {
 }
 
 static void my_touchpad_read(lv_indev_drv_t *drv, lv_indev_data_t *data) {
+  static bool was_pressed = false;
   uint16_t x = 0x00;
   uint16_t y = 0x00;
   if (touch_dev->GetCoords(&x, &y)) {
+    bsp_display_activity();
+    was_pressed = true;
     data->point.x = x;
     data->point.y = y;
     if (data->point.x > BSP_LCD_H_RES)
@@ -117,6 +131,8 @@ static void my_touchpad_read(lv_indev_drv_t *drv, lv_indev_data_t *data) {
       data->point.y = BSP_LCD_V_RES;
     data->state = LV_INDEV_STATE_PRESSED;
   } else {
+    if (was_pressed) bsp_display_activity();
+    was_pressed = false;
     data->state = LV_INDEV_STATE_RELEASED;
   }
 }
@@ -174,6 +190,7 @@ void bsp_lvgl_init(I2cMasterBus &i2cbus) {
   ESP_ERROR_CHECK(esp_lcd_panel_init(panel_handle));
   /*LVGL INIT*/
   lv_init();
+  idle_brightness_activity(&idle_brightness, lv_tick_get());
   /* Two 20-line buffers keep double buffering and DMA completion semantics
    * while freeing ~57 KiB for the C6 voice/TLS workload. */
   lv_color_t *buf1 = (lv_color_t *)heap_caps_malloc(BSP_LCD_H_RES * 10 * sizeof(lv_color_t), MALLOC_CAP_DMA);
@@ -211,11 +228,11 @@ void bsp_lvgl_init(I2cMasterBus &i2cbus) {
 
 void Lcd_SetBacklight(uint8_t brightness) {
   if (brightness > 100) brightness = 100;
-  brightness_ = brightness;
-  uint8_t bl_val = (uint8_t)((brightness_ * 255) / 100);
+  uint8_t bl_val = (uint8_t)((brightness * 255) / 100);
   uint32_t CMD = 0x51;
   CMD &= 0xFF;
   CMD <<= 8;
   CMD |= 0x02 << 24;
-  esp_lcd_panel_io_tx_param(io_handle, CMD, &bl_val, 1);
+  if (esp_lcd_panel_io_tx_param(io_handle, CMD, &bl_val, 1) == ESP_OK)
+    brightness_ = brightness;
 }

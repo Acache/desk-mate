@@ -92,6 +92,7 @@ static void poll_button(ButtonState &b, int short_action, int hold_action) {
   if (down != b.raw) { b.raw = down; b.changed_at = now; }
   if (b.raw != b.stable && now - b.changed_at >= 30) {
     b.stable = b.raw;
+    bsp_display_activity();
     if (b.stable) {
       b.pressed_at = now; b.repeat_at = now + 1400; b.held = false;
       b.owner_page = focus_page;
@@ -118,6 +119,7 @@ static void poll_button(ButtonState &b, int short_action, int hold_action) {
       b.timer_key = false;
     }
   }
+  if (b.stable) bsp_display_activity();
   if (b.stable && !b.held && now - b.pressed_at >= 700) {
     b.held = true;
     if (!b.suppressed && !power_hold_visible(&power_hold) && b.owner_page == focus_page && b.owner_layer == (bt_input_generation()+vh_generation)) {
@@ -143,7 +145,10 @@ void loop() {
     poll_button(key_button, 1, 5);
     if (millis() - last_pmu >= 20) {
       last_pmu = millis();
-      if (power_ui_input(PMU_PollButton())) {
+      uint8_t power_events = PMU_PollButton();
+      bool power_tap = power_ui_input(power_events);
+      if (power_events || power_hold.down) bsp_display_activity();
+      if (power_tap) {
         Serial.println("BUTTON PWR tap");
         if(vh_is_open()){vh_key(0,false);
         } else if (bt_is_open()) {

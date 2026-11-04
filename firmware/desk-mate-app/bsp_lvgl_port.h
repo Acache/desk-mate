@@ -8,5 +8,7 @@ void bsp_lvgl_unlock(void);
 void bsp_lvgl_init(I2cMasterBus& i2cbus);
 
 void Lcd_SetBacklight(uint8_t brightness);
+// Call with the LVGL mutex held; restores brightness without consuming input.
+void bsp_display_activity(void);
 
 #endif // !USER_CONFIG_H

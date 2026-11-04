@@ -47,6 +47,11 @@ Design constraints that shaped the implementation:
 | 2 — Media | Media/volume keys, 8 saved hosts, pairing and connection manager | BLE HID (NimBLE) |
 | 3 — Voice | Push-to-talk Bilibili control with cancel, plus a feedback overlay | BLE (shared with media) or TLS WebSocket → local host service |
 
+All three screens and their overlays dim to 50% over one second after 10 seconds
+without input. Touch, swipes, or BOOT/KEY/PWR input immediately restore full brightness
+and retain their normal actions; holding an input keeps the display bright.
+Timers, animations and other functions continue while dimmed.
+
 Bluetooth pairing, switching, rename/forget and reconnect settings: [Bluetooth guide](docs/BLUETOOTH.md).
 
 Production voice defaults to the same BLE connection as media; Wi-Fi/WSS remains selectable.
