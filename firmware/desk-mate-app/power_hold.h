@@ -6,12 +6,11 @@
 #define POWER_HOLD_DELAY_MS 1000u
 #define POWER_HOLD_PROGRESS_MS 3000u
 #define POWER_HOLD_REWIND_MS 2000u
-#define POWER_HOLD_FADE_MS 1000u
 #define POWER_KEY_DOWN 1u
 #define POWER_KEY_UP 2u
 #define POWER_KEY_SHORT 4u
 
-typedef enum { POWER_IDLE, POWER_HOLD, POWER_REWIND, POWER_FADE } PowerPhase;
+typedef enum { POWER_IDLE, POWER_HOLD, POWER_REWIND } PowerPhase;
 typedef struct {
     PowerPhase phase;
     bool down, suppress_short;
@@ -20,7 +19,7 @@ typedef struct {
 } PowerHold;
 
 static inline bool power_hold_visible(const PowerHold *p) {
-    return p->phase == POWER_REWIND || p->phase == POWER_FADE ||
+    return p->phase == POWER_REWIND ||
         (p->phase == POWER_HOLD && p->suppress_short);
 }
 static inline void power_hold_tick(PowerHold *p, uint32_t now) {
@@ -32,17 +31,15 @@ static inline void power_hold_tick(PowerHold *p, uint32_t now) {
             if (p->progress_ms > POWER_HOLD_PROGRESS_MS) p->progress_ms = POWER_HOLD_PROGRESS_MS;
         }
         p->opacity = 255;
-    } else if (p->phase == POWER_REWIND || p->phase == POWER_FADE) {
+    } else if (p->phase == POWER_REWIND) {
         uint32_t elapsed = now - p->released_at;
         if (elapsed < p->rewind_ms) {
             p->progress_ms = p->released_progress * (p->rewind_ms - elapsed) / p->rewind_ms;
         } else {
             p->progress_ms = 0;
-            p->phase = POWER_FADE;
-            uint32_t fade = elapsed - p->rewind_ms;
-            p->opacity = fade < POWER_HOLD_FADE_MS ?
-                (uint8_t)(255u * (POWER_HOLD_FADE_MS - fade) / POWER_HOLD_FADE_MS) : 0;
-            if (!p->opacity) p->phase = POWER_IDLE;
+            // Group-opacity fading repaints the entire display on this panel.
+            // Once the reverse countdown reaches zero, dismiss immediately.
+            p->phase = POWER_IDLE;
         }
     }
 }

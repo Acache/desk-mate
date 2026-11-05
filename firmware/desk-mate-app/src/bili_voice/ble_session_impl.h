@@ -62,10 +62,21 @@ static void poll_ble_session(){
    bv_clear_auth();
    const char*id=doc["server_id"]|"",*host_nonce=doc["nonce"]|"";
    int slot=vh_find(&s_hosts,id);char binding[37];
-   if(slot<0||!bv_nonce(host_nonce)||(s_pending&&strcmp(s_ts.pending.server_id,id))||
-      (bv_binding_get(link.address,link.type,binding)&&strcmp(binding,id))){bv_fail("BLE_PAIRING_REQUIRED");return;}
+   bool nonce_ok=bv_nonce(host_nonce);
+   bool pending_other=s_pending&&strcmp(s_ts.pending.server_id,id);
+   bool binding_other=bv_binding_get(link.address,link.type,binding)&&strcmp(binding,id);
+   if(slot<0||!nonce_ok||pending_other){
+    // Report only gate results, never a token, authentication key or proof.
+    Serial.printf("BLE AUTH: rejected slot=%d nonce=%d pending_other=%d binding_other=%d\n",slot,(int)nonce_ok,(int)pending_other,(int)binding_other);
+    bv_fail("BLE_PAIRING_REQUIRED");return;
+   }
    bv_candidate.reset(new(std::nothrow)VoiceConfig{});
-   if(!bv_candidate||!vc_hosts_load(slot,bv_candidate.get())){bv_fail("BLE_PAIRING_REQUIRED");return;}
+   if(!bv_candidate||!vc_hosts_load(slot,bv_candidate.get())){Serial.printf("BLE AUTH: profile load failed slot=%d\n",slot);bv_fail("BLE_PAIRING_REQUIRED");return;}
+   bool usb_binding_pending=vc_hosts_binding_pending(slot,bv_candidate->device_id);
+   if(binding_other&&!usb_binding_pending){
+    Serial.printf("BLE AUTH: rejected slot=%d nonce=%d pending_other=%d binding_other=%d\n",slot,(int)nonce_ok,(int)pending_other,(int)binding_other);
+    bv_fail("BLE_PAIRING_REQUIRED");return;
+   }
    bv_slot=slot;uint8_t random[32];char nonce[65];esp_fill_random(random,32);bv_hex(random,32,nonce);
    bv_transcript=String("desk-mate-ble-v1|")+id+"|"+bv_candidate->device_id+"|"+String(link.epoch)+"|"+nonce+"|"+host_nonce;
    mbedtls_sha256((const uint8_t*)bv_candidate->token,strlen(bv_candidate->token),bv_key,0);
@@ -76,7 +87,8 @@ static void poll_ble_session(){
    JsonDocument reply;reply["type"]="ble_auth_proof";reply["proof"]=bv_proof("device");
    if(!send_doc(reply)){bv_fail("BLE_SEND_FAILED");return;}bv_phase=2;
   }else if(!strcmp(type,"ble_auth_complete")&&bv_phase==2){
-   if(!bv_equal(doc["proof"]|"",bv_proof("complete"))||!bv_binding_set(link.address,link.type,bv_candidate->server_id)||!vc_config_activate(bv_slot)){
+   bool complete_verified=bv_equal(doc["proof"]|"",bv_proof("complete"));
+   if(!vc_hosts_finalize_binding(bv_slot,bv_candidate.get(),link.address,link.type,complete_verified)||!vc_config_activate(bv_slot)){
     bv_fail("BLE_AUTH_FAILED");return;
    }
    s_hosts.active=s_hosts.target=bv_slot;s_hosts.switching=false;s_switch_reset=true;

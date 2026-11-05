@@ -138,7 +138,7 @@ def _context_payload(context: TrustedContext, transcript: str = "") -> dict[str,
     # 50 selectable indices, including grid coordinates, rather than top-k loss.
     player_only = any(k in transcript for k in ("音量", "声音", "小声", "大声", "太吵", "快进", "后退")) and not any(
         k in transcript for k in ("搜索", "播放", "第", "那个", "顺便", "然后", "并", "再", "收藏", "点赞"))
-    if search and search.expires_at >= context.now and not player_only:
+    if search and search.expires_at >= context.now and not player_only and (not context.page_context or context.page_context.get("page")=="search"):
         title_limit = min(120,max(1,2400//max(1,len(search.results[:50]))))
         payload["search"] = {
             "search_result_id": str(search.search_result_id),
@@ -156,6 +156,7 @@ def _context_payload(context: TrustedContext, transcript: str = "") -> dict[str,
             return [{"i": i + 1, "video_id": str(x.get("bvid") or ""),
                      "title": str(x.get("title") or "")[:60]} for i, x in enumerate((items or [])[:12])]
         payload["page"] = {"type": str(page.get("page") or "other"),
+                           "home_results": brief(page.get("home_results")),
                            "search_results": brief(page.get("search_results")),
                            "episodes": brief(page.get("episodes")),
                            "recommendations": brief(page.get("recommendations"))}

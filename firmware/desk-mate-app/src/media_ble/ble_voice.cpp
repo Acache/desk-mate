@@ -1,5 +1,6 @@
 #include "ble_voice.h"
 #include "ble_manager.h"
+#include "ble_voice_subscription.h"
 #include <Arduino.h>
 #include <NimBLEDevice.h>
 #include <atomic>
@@ -29,7 +30,11 @@ class Rx:public NimBLECharacteristicCallbacks {
 class Tx:public NimBLECharacteristicCallbacks{
  void onSubscribe(NimBLECharacteristic*,NimBLEConnInfo&i,uint16_t value)override{
   BleSnapshot v;ble_manager_read(&v);
-  if(v.handle==i.getConnHandle()&&i.isEncrypted()&&i.isBonded())subscribed=value&1?v.generation:0;
+  if(v.handle==i.getConnHandle()&&i.isEncrypted()&&i.isBonded()){
+   uint32_t next=value&1?v.generation:0;
+   uint32_t previous=subscribed.exchange(next);
+   if(bv_subscription_starts_session(previous,next))reset=true;
+  }
  }
 };
 class Status:public NimBLECharacteristicCallbacks{

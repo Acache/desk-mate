@@ -127,7 +127,7 @@ def result_detail(state: CommandState, code: ErrorCode | None, summary: str) -> 
         return "NOT CLEAR / TRY AGAIN" if "听清" in summary else "NO SPEECH / TRY AGAIN"
     if code is ErrorCode.CLARIFY_NEEDED:
         if "搜索" in summary:
-            return "SEARCH FIRST"
+            return "NEED VISIBLE TARGET"
         if "多个动作" in summary or "分开说" in summary:
             return "SAY ONE COMMAND"
         if "弹幕" in summary:
@@ -341,12 +341,6 @@ class Pipeline:
             self.ctx.db.set_transcript(
                 command_id, transcript.raw_model_text, transcript.normalized_text, transcript.model_digest
             )
-            if not has_supported_intent(transcript.normalized_text):
-                reason = unsupported_intent_reason(transcript.normalized_text)
-                self._finalize(command_id, CommandState.FAILED, ErrorCode.OUT_OF_SCOPE,
-                               reason or "没有识别到 B 站指令，请说打开B站、搜索、播放、暂停或继续")
-                await self._send_result(command_id, notify)
-                return
             self.ctx.db.transition(command_id, CommandState.PLANNING)
             await notify(Progress(msg_id=0, command_id=UUID(command_id), stage="planning", step_index=None))
             t_refresh0 = time.perf_counter()
@@ -363,22 +357,7 @@ class Pipeline:
                     page = None
                 if page:
                     context.page_context = page
-                    from .context_rules import PageContext, resolve as resolve_context
-
-                    decision = resolve_context(transcript.normalized_text, PageContext(
-                        page=str(page.get("page") or "other"),
-                        search_results=list(page.get("search_results") or []),
-                        episodes=list(page.get("episodes") or []),
-                        recommendations=list(page.get("recommendations") or []),
-                    ))
-                    if decision and decision.get("action") == "bilibili.play":
-                        proposal = contracts.DecisionProposal(
-                            status=contracts.DecisionStatus.ok,
-                            reason_code=contracts.ReasonCode.none,
-                            actions=[contracts.ActionStep(id=0, action="bilibili.play",
-                                                          params=dict(decision["params"]))],
-                        )
-                        route = "context"
+                    if page.get("page") != "search": context.search_snapshot = None
             # Prefer the deterministic R1 grammar for clear commands. The LLM
             # must not add an unspoken search/play action to "打开B站".
             if proposal is None:
@@ -393,10 +372,13 @@ class Pipeline:
                     await asyncio.to_thread(self.ctx.refresh_player)
                 except Exception:
                     pass
+                page_context = context.page_context
                 context = self._context(command_id)
+                context.page_context = page_context
+                if page_context and page_context.get("page") != "search": context.search_snapshot = None
             t_refresh = time.perf_counter()
             route = "rules"
-            if proposal is None and self.ctx.personalizer is not None and personalization_candidate(transcript.normalized_text):
+            if proposal is None and not context.page_context and self.ctx.personalizer is not None and personalization_candidate(transcript.normalized_text):
                 route = "personalizer"
                 proposal = self.ctx.personalizer.propose(transcript.normalized_text)
             if proposal is None:
@@ -407,6 +389,8 @@ class Pipeline:
                 )
             log.info("decision command=%s route=%s decision_ms=%d", command_id, route,
                      int((time.perf_counter() - t_refresh) * 1000))
+            from .context_rules import guard_visible_targets
+            proposal = guard_visible_targets(proposal, transcript.normalized_text, context.page_context)
             proposal = apply_policy_guard(transcript.normalized_text, proposal)
             if self._cancelled(command_id):
                 return
@@ -488,6 +472,7 @@ class Pipeline:
             self._finalize(command_id, CommandState.FAILED, exc.code, exc.summary)
             await self._send_result(command_id, notify)
         except Exception as exc:
+            log.exception("pipeline failure command=%s", command_id)
             self._finalize(command_id, CommandState.FAILED, ErrorCode.STORAGE_ERROR, "处理失败，请重试")
             await self._send_result(command_id, notify)
 

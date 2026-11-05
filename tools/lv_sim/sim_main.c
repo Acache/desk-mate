@@ -1,4 +1,6 @@
 #include <stdio.h>
+#include <time.h>
+#include "../../firmware/desk-mate-app/display_tuning.h"
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
@@ -20,15 +22,22 @@ static void sim_bt_read(BleSnapshot *out) { *out=sim_bt; }
 static bool sim_bt_submit(const BleRequest *request) { sim_bt_request=*request; ++sim_bt_requests; return true; }
 static FocusBiliStatus sim_bili;
 static void sim_read_bili(FocusBiliStatus *out) { *out = sim_bili; }
+static clock_t profile_started;
+static uint64_t flushed_pixels;
+static unsigned flush_count;
+static void count_flush(const lv_area_t *a) {
+    flushed_pixels += (uint64_t)(a->x2 - a->x1 + 1) * (a->y2 - a->y1 + 1);
+    flush_count++;
+}
 #if LVGL_VERSION_MAJOR >= 9
 static void flush(lv_display_t *d, const lv_area_t *a, uint8_t *p) {
-    (void)a; (void)p; lv_display_flush_ready(d);
+    count_flush(a); (void)p; lv_display_flush_ready(d);
 }
 static void read_pointer(lv_indev_t *d, lv_indev_data_t *v) {
 #else
 #define lv_screen_active lv_scr_act
 static void flush(lv_disp_drv_t *d, const lv_area_t *a, lv_color_t *p) {
-    (void)a; (void)p; lv_disp_flush_ready(d);
+    count_flush(a); (void)p; lv_disp_flush_ready(d);
 }
 static void read_pointer(lv_indev_drv_t *d, lv_indev_data_t *v) {
 #endif
@@ -136,7 +145,7 @@ static void run_tests(void) {
     advance(1000);
     assert(focus_timer.remaining_ms < focus_timer.duration_ms);
     focus_go_page(1, true); advance(1200); expect_page(1);
-    assert(!lv_obj_has_flag(focus_arcs[1], LV_OBJ_FLAG_HIDDEN));
+    assert(focus_arcs[1]==NULL);assert(strstr(lv_label_get_text(focus_media_timer),"FOCUS"));
     unsigned remaining = focus_timer.remaining_ms;
     focus_set_connected(false); advance(500);
     assert(focus_timer.running && focus_timer.remaining_ms < remaining);
@@ -433,10 +442,10 @@ static void power_tests(void) {
     assert(media_count == before_media && sim_bt_requests == before_bt);
     advance(440);
     assert(lv_arc_get_value(power_ring) >= 720 && lv_arc_get_value(power_ring) <= 780);
-    advance(500); power_ui_input(0); assert(lv_arc_get_value(power_ring) == 0);
-    advance(500);
-    assert(power_overlay && lv_obj_get_style_opa(power_overlay, 0) < 150);
-    advance(550); assert(!power_overlay);
+    assert(lv_obj_get_style_opa(power_overlay, 0) == LV_OPA_COVER);
+    advance(480); assert(power_overlay); /* remains opaque until rewind completes */
+    advance(20); power_ui_input(0); assert(!power_overlay);
+    advance(1050); assert(!power_overlay);
     /* Repeated cancellation and new presses do not retain stale animations. */
     for (int i = 0; i < 3; ++i) {
         power_ui_input(POWER_KEY_DOWN); advance(2200); assert(power_overlay);
@@ -446,7 +455,7 @@ static void power_tests(void) {
         assert(!strcmp(lv_label_get_text(power_seconds), "3s"));
         power_ui_input(POWER_KEY_UP); advance(3050); assert(!power_overlay);
     }
-    puts("power UI: hold, touch isolation, rewind, fade, re-press PASS");
+    puts("power UI: hold, touch isolation, rewind, immediate dismissal, re-press PASS");
 }
 static void bluetooth_tests(void) {
     memset(&sim_bt,0,sizeof(sim_bt)); sim_bt.enabled=true; sim_bt.auto_reconnect=true;
@@ -496,6 +505,18 @@ static void bluetooth_tests(void) {
     swap=sim_bt.hosts[6]; sim_bt.hosts[6]=sim_bt.hosts[7]; sim_bt.hosts[7]=swap;
     bt_close();
     int before_media=media_count;
+    /* A pending layout/scroll under the full-screen manager cannot choose the
+     * visible page on return. Check every frame, not only the final snapshot. */
+    focus_go_page(PAGE_MAC, false); advance(100);
+    bt_open(); advance(100);
+    lv_obj_scroll_to_x(focus_pager, 0, LV_ANIM_OFF);
+    bt_back();
+    for (int frame = 0; frame < 80; frame++) {
+        lv_obj_update_layout(focus_pager);
+        assert(lv_obj_get_scroll_x(focus_pager) == 480);
+        assert(focus_page == PAGE_MAC);
+        advance(5);
+    }
     for(int n=0;n<20;n++) {
         bt_open(); bt_tick(); assert(bt_is_open()); check_bt_memory("list");
         assert(!lv_obj_has_flag(focus_pager,LV_OBJ_FLAG_SCROLLABLE));
@@ -532,7 +553,9 @@ static void bluetooth_tests(void) {
     // Exercise the real pointer event path while a clicked button rebuilds its parent view.
     sim_bt.count=2; sim_bt.handle=1; sim_bt.current=sim_bt.selected=0; sim_bt.state=BLE_READY;
     focus_go_page(PAGE_MAC,false); advance(100);
-    pointer(240,94,true,80); pointer(240,94,false,100);
+    pointer(240,15,true,40);pointer(240,290,true,120);pointer(240,290,false,220);
+    assert(conn_panel);
+    pointer(240,135,true,80); pointer(240,135,false,100);
     assert(bt_is_open()); bt_tick();
     pointer(240,380,true,80); pointer(240,380,false,100);
     assert(bt_screen_mode==BT_ADD_CONFIRM);
@@ -570,16 +593,127 @@ static void bluetooth_tests(void) {
     snprintf(sim_bt.hosts[2].name,BLE_NAME_BYTES,"Actual Phone");
     bt_tick(); assert(bt_screen_mode==BT_PAIRED); bt_activate(BT_DONE);
     assert(bt_screen_mode==BT_LIST&&bt_known_count==3);
-    bt_close(); bt_read=NULL; bt_submit=NULL;
+    bt_close(); if(conn_active)conn_close(); bt_read=NULL; bt_submit=NULL;
     puts("Bluetooth UI: identity-bound actions, confirmation, rename, capacity, modal isolation, lifecycle PASS");
+}
+static void profile_reset(void) { flushed_pixels = 0; flush_count = 0; profile_started=clock(); }
+static void profile_report(const char *name) {
+    printf("PROFILE %-16s pixels=%llu flushes=%u cpu_ms=%.3f\n", name,
+           (unsigned long long)flushed_pixels, flush_count,1000.0*(clock()-profile_started)/CLOCKS_PER_SEC);
+}
+static void redraw_tests(void) {
+    /* Stable snapshots must not dirty visible pixels on any main page. */
+    for (int page = 0; page < PAGE_COUNT; ++page) {
+        focus_go_page(page, false);
+        focus_dots_until = 0;
+        sim_bili.state = 2;
+        advance(200);
+        profile_reset(); advance(1000);
+        assert(flushed_pixels == 0);
+    }
+    /* Changed snapshots still update labels and invalidate the visible area. */
+    profile_reset(); sim_bili.state = 5; sim_bili.cancel_remaining_ms = 700;
+    advance(100);
+    assert(flushed_pixels > 0);
+    assert(!strcmp(lv_label_get_text(focus_bili_timer), "0.7s"));
+    sim_bili.state = 0;
+    focus_go_page(PAGE_FOCUS, false); advance(200);
+    puts("UI redraw: stable pages stay clean, changed countdown renders PASS");
+}
+static void connections_tests(void) {
+    sim_host_setup();
+    sim_bt.count=1;sim_bt.current=sim_bt.selected=0;sim_bt.state=BLE_READY;
+    strcpy(sim_bt.hosts[0].name,"Test Mac");
+    bt_bind(lv_screen_active(),focus_pager,sim_bt_read,sim_bt_submit);
+    sim_hosts.command_busy=false;sim_hosts.catalog.switching=false;
+    for(int page=0;page<PAGE_COUNT;page++) {
+        focus_go_page(page,false);advance(100);
+        assert(focus_arcs[1]==NULL);
+        assert(!lv_obj_has_flag(focus_mac_title,LV_OBJ_FLAG_CLICKABLE));
+        assert(!lv_obj_has_flag(focus_bili_dot,LV_OBJ_FLAG_CLICKABLE));
+        conn_open();assert(conn_panel);
+        check_bt_memory("connections root");
+        conn_activate(0);assert(bt_is_open()&&!conn_panel);
+        bt_back();assert(conn_panel&&!bt_is_open());
+        assert(strcmp(lv_label_get_text(focus_mac_title),"Your devices.")!=0 || sim_bt.current<0);
+        conn_activate(1);assert(vh_is_open()&&vh_mode==VH_UI_NETWORK);
+        vh_back();assert(conn_panel&&!vh_is_open());
+        conn_activate(2);assert(vh_mode==VH_UI_TRANSPORT);
+        vh_activate(VH_UI_COMPUTERS);assert(vh_mode==VH_UI_LIST);
+        vh_back();assert(vh_mode==VH_UI_TRANSPORT);
+        vh_back();assert(conn_panel);
+        power_ui_input(POWER_KEY_DOWN);advance(1200);assert(power_overlay);
+        check_bt_memory("connections with power");
+        power_ui_input(POWER_KEY_UP);advance(1000);assert(!power_overlay);
+        conn_close();advance(100);expect_page(page);
+    }
+    focus_go_page(PAGE_BILI,false);advance(100);
+    sim_hosts.command_busy=true;conn_open();assert(!conn_active);
+    sim_hosts.command_busy=false;
+    pointer(240,15,true,40);pointer(240,140,true,60);pointer(240,140,false,220);
+    assert(!conn_panel); /* less than half: cancel opening */
+    pointer(240,15,true,40);pointer(240,315,true,90);pointer(240,100,true,90);pointer(240,100,false,220);
+    assert(!conn_panel); /* Reverse the opening drag before release. */
+    pointer(240,15,true,40);pointer(240,290,true,120);pointer(240,290,false,220);
+    assert(conn_panel && lv_obj_get_y(conn_panel)==0);
+    pointer(240,450,true,40);pointer(240,320,true,80);pointer(240,320,false,220);
+    assert(conn_panel && lv_obj_get_y(conn_panel)==0); /* cancel closing */
+    pointer(240,450,true,40);pointer(240,160,true,120);pointer(240,160,false,220);
+    assert(!conn_panel);
+    focus_go_page(PAGE_FOCUS,false);advance(100);
+    puts("Connections: shared entry, three branches, back stack, return page, power overlay PASS");
+}
+static void profile_ui(void) {
+    /* Deterministic redraw demand only: the simulator has no SPI or audio load. */
+    advance(200);
+    profile_reset(); advance(1000); profile_report("focus-idle");
+    profile_reset(); focus_go_page(PAGE_MAC, true); advance(600); profile_report("page-snap");
+    profile_reset(); advance(1000); profile_report("media-idle");
+    profile_reset(); drag(430, 50, 240, 20); profile_report("finger-drag");
+    focus_go_page(PAGE_BILI, false);
+    sim_bili.state = 2; sim_bili.connected = sim_bili.ready = 1; advance(200);
+    profile_reset(); advance(1000); profile_report("voice-ready");
+    sim_bili.state = 5;
+    profile_reset();
+    for (unsigned elapsed = 0; elapsed <= 840; elapsed += 20) {
+        sim_bili.cancel_remaining_ms = 840 - elapsed; advance(20);
+    }
+    profile_report("voice-cancel");
+    assert(lv_obj_get_style_width(focus_bili_cancel_fill, LV_PART_MAIN) <= 20);
+    sim_bili.state = 4; advance(100);
+    profile_reset();
+    for (unsigned i = 0; i < 20; i++) {
+        sim_bili.rms = i % 4 < 2 ? 0.02f : 0.001f;
+        sim_bili.recording_ms = i * 50; advance(50);
+    }
+    profile_report("voice-wave");
+    assert(focus_bili_wave[20] && lv_obj_get_height(focus_bili_wave[20]) > 4);
+    sim_bili.state = 2; advance(200);
+    focus_feedback_show("profile-feedback", "DONE"); advance(100);
+    profile_reset(); advance(1000); profile_report("feedback");
+    focus_feedback_hide("unfeedback", "profile");
+    focus_go_page(PAGE_FOCUS, false); advance(200);
+    profile_reset(); focus_wheel_snap(0, 1); advance(200); profile_report("wheel-snap");
+    power_ui_input(POWER_KEY_DOWN); advance(1200);
+    profile_reset(); advance(1000); profile_report("power-hold");
+    power_ui_input(POWER_KEY_UP); advance(200);
+    profile_reset(); advance(3000); profile_report("power-release");
+    assert(!power_overlay);
+    focus_go_page(PAGE_MAC, false);
+    sim_bt.enabled = true; sim_bt.capacity = 8;
+    bt_bind(lv_screen_active(), focus_pager, sim_bt_read, sim_bt_submit);
+    bt_open(); advance(200);
+    profile_reset(); advance(1000); profile_report("ble-manager");
+    bt_close(); bt_read = NULL; bt_submit = NULL;
 }
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
     bool test = argc > 1 && strcmp(argv[1], "--test") == 0;
     bool capture = argc > 1 && strcmp(argv[1], "--screenshot") == 0;
+    bool profile = argc > 1 && strcmp(argv[1], "--profile-ui") == 0;
     lv_init();
 #if LVGL_VERSION_MAJOR >= 9
-    if (test || capture) {
+    if (test || capture || profile) {
         lv_tick_set_cb(test_clock);
         lv_display_t *d = lv_display_create(480, 480);
         static uint8_t buffer[480 * 40 * 4];
@@ -594,12 +728,12 @@ int main(int argc, char **argv) {
         lv_sdl_mouse_create();
     }
 #else
-    if (!test && !capture) { fprintf(stderr, "Use LVGL 9 simulator for interactive mode.\n"); return 2; }
-    static lv_color_t pixels[480 * 10];
+    if (!test && !capture && !profile) { fprintf(stderr, "Use LVGL 9 simulator for interactive mode.\n"); return 2; }
+    static lv_color_t pixels[480 * DESKMATE_DRAW_LINES];
     static lv_disp_draw_buf_t buf;
     static lv_disp_drv_t display;
     static lv_indev_drv_t input;
-    lv_disp_draw_buf_init(&buf, pixels, NULL, 480 * 10);
+    lv_disp_draw_buf_init(&buf, pixels, NULL, 480 * DESKMATE_DRAW_LINES);
     lv_disp_drv_init(&display);
     display.hor_res = display.ver_res = 480;
     display.draw_buf = &buf; display.flush_cb = flush;
@@ -616,7 +750,8 @@ int main(int argc, char **argv) {
     assert(memory.total_size - memory.free_size < 48u * 1024u);
 #endif
     assert(strcmp(lv_label_get_text(focus_battery), "85%") == 0);
-    if (test) { run_tests(); feedback_tests(); power_tests(); bluetooth_tests(); voice_host_ui_tests(); voice_page_state_tests(); return 0; }
+    if (profile) { profile_ui(); return 0; }
+    if (test) { redraw_tests(); run_tests(); feedback_tests(); power_tests(); bluetooth_tests(); voice_host_ui_tests(); voice_page_state_tests(); connections_tests(); return 0; }
     if (capture) {
         int page = argc > 2 ? atoi(argv[2]) : 0;
         if (argc > 4 && strcmp(argv[4], "connected") == 0) {
@@ -656,6 +791,7 @@ int main(int argc, char **argv) {
                 if(!strcmp(argv[4],"voice-network"))vh_activate(VH_UI_NETWORK_ACTION);
             }
         }
+        if(argc>4&&!strcmp(argv[4],"connections")){sim_host_setup();conn_open();advance(100);}
         if (argc > 4 && !strncmp(argv[4], "power", 5)) {
             power_ui_input(POWER_KEY_DOWN); advance(2800);
             if (!strcmp(argv[4], "power-cancel")) { power_ui_input(POWER_KEY_UP); advance(400); }

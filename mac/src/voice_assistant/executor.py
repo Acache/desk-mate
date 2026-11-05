@@ -214,7 +214,10 @@ class Executor:
                 last_code = ErrorCode.INTERRUPTED
                 stop = True
                 continue
-            step_deadline = min(deadline, plan.expires_at, self.clock() + 5.0)
+            # Opening a video may need a cold network/player load before its
+            # clock advances. Other controls retain their short action budget.
+            step_budget = 25.0 if action.action == "bilibili.play" else 5.0
+            step_deadline = min(deadline, plan.expires_at, self.clock() + step_budget)
             try:
                 receipt = adapter.invoke(prepared, step_deadline)
             except AdapterError as exc:

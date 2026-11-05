@@ -138,3 +138,70 @@ are distinct from physical speech, host switching and phone provisioning QA.
 - 有损压缩下 SHA 校验要对齐“解码后 PCM”：编码器内部本来就有重建样本，固件对重建样本做哈希即可与主机落盘文件一致，无需改 seal/commit 语义。
 - 用户纠正：不要用“按下就立刻说话”教用户迁就程序。用户会先按住再思考，程序要按最坏等待时间设计。任何“让用户改变操作习惯”的临时方案都应在下一轮被结构性修复替代。
 - 设备文案之前靠中文 summary 关键词匹配，`OUT_OF_SCOPE` 因含“搜索”被显示成 `SEARCH EXPIRED`。应让服务端下发机器可读 `code` + ASCII `detail`，设备只负责显示。
+
+## [LRN-20261104-ANIM] correction
+
+**Logged**: 2026-11-04
+**Priority**: medium
+**Status**: resolved
+**Area**: frontend
+
+### Summary
+Animation optimization must cover all dynamic effects, not only power and page transitions.
+
+### Details
+User clarified scope includes finger drag, voice cancellation countdown, waveform and all other UI animation. Previous discussion identified power/page issues without completing that inventory.
+
+### Suggested Action
+Inventory every timer, animation and dynamic setter before claiming complete analysis; distinguish reduced redraw demand from measured hardware FPS.
+
+### Metadata
+- Source: user_feedback
+- Related Files: firmware/desk-mate-app/focus_ui.h, firmware/desk-mate-app/power_ui.h
+- Tags: scope, animation, profiling
+
+## [LRN-20261105-UX] correction
+
+**Status**: resolved
+**Area**: frontend
+
+Device drawer should have flat drawn chevrons, no redundant Close/instruction label, and finger-tracked motion with halfway commit/cancel. Passive connection status must not look like an action button. Preserve these distinctions when simplifying future screens. Routine startup waiting and automatic reconnect must never trigger modal error dialogs; report the actual failure stage and notify only on meaningful transitions.
+
+## [LRN-20261105-RELEASE] correction
+
+**Status**: resolved workflow; signing limitation documented
+**Area**: infra
+
+Never relocate the local app during iterative testing: preserve build/usability-release/Desk-Mate.app and replace it transactionally. Changing both path and ad-hoc code identity invalidates the user's verification baseline and can leave privacy toggles associated with old code. Keep version/build visible, regular app activation, automatic main window and lightweight main-process permission recheck. No automatic TCC reset; a stable certificate is needed to promise cross-build grants.
+
+Context-first fixes must reach the whole collector→route→refresh→model→binding→execution chain, including home pages and complete compound instructions, rather than just adding a parser branch or hiding SEARCH FIRST.
+
+## [LRN-20261105-REAL-ACCEPTANCE] correction
+
+**Status**: resolved; real playback and cross-build native permission acceptance passed
+**Area**: backend / macOS
+
+Do not run any native checks from a staging `.app`. Initializing NSApp/privacy APIs there can register the staging filename as the authorization client. Native permission status must come from the running desktop App, not a CLI child executing the same binary. Restore explicit AX/Screen Capture request APIs for an explicit recheck and keep ordinary refresh prompt-free. A checked stale code identity in System Settings is not evidence that the current process has permission.
+
+Parser success and mocked execution did not prove “播放第一个视频” worked. The real failed recording had the correct home BV plan but was rejected by an AX-only capability gate. A home-only CDP page must expose play capability before a player exists. Verify the entire real recording→STT→context→planner→adapter→correct BV→advancing media clock chain. Cold player loading also needs a realistic, bounded action budget; do not weaken success to “click dispatched”.
+
+Run success evidence through the actual storage path too: canonical JSON prohibits floats, so CDP float seconds caused `STORAGE_ERROR` only after playback succeeded. Persist integer milliseconds and test real Adapter→Executor→SQLite→terminal result, not just adapter.verify(). The original failed recording now produces actual `SUCCEEDED / DONE` on published build 9.
+
+A persistent self-signed certificate can provide normal certificate-bound local code identity without an Apple developer account or system trust changes. Two real published builds with different code hashes were verified against the same certificate DR. This does not migrate old ad-hoc TCC grants: ask for explicit permission before replacing the two stale system privacy entries, and never silently reset or fake their state.
+
+After the user explicitly approved those two operations, select the canonical app through System Settings and complete both grants before restarting the App once. System Settings can keep the old staging display label in its own process cache: quitting and reopening Settings refreshed both rows to Desk-Mate without touching grants again. Build 9 → 10 then retained both real native preflight grants automatically across multiple refresh cycles, and backend AX capabilities were available. Test the next signed build after consent rather than only proving two signatures share a DR.
+
+## [LRN-20261105-USB-ATOMIC] root cause and validation
+
+**Status**: resolved; complete single-board hardware and native UI acceptance passed on 0.3.2 build 14
+**Area**: macOS / ESP32 USB
+
+Setting DTR and RTS false before pySerial.open does not avoid this ESP32-C6's reset: POSIX open still performs two separate modem ioctls. A controlled test produced a fresh USB_UART_HPSYS boot before any authorization payload. Pure os.open/close stayed authenticated; atomic TIOCMGET/masked TIOCMSET of both bits then passed real open/VA_SETUP/close with no boot banner, no link loss and stable service/model PIDs. Use usb_serial.open_provisioning_port for this identified native USB adapter. Do not disable the chip USB reset bit globally or change Bluetooth auto-reconnect preference as a workaround.
+
+USB registration history must commit with credential insertion/revocation in SQLite. An independently reproduced JSON-after-DB-commit failure left stale history and caused repeated rotations plus two active credentials. The final implementation uses schema-3 usb_registrations and one transaction; a failed optional summary write is a warning, not a false authorization failure. After a board ACK but failed database commit, distinguish that partial outcome and explicit repair from a cable error. Roll back failed COMMIT while the connection is still in_transaction so later operations can recover.
+
+The first complete grant test exposed separate BLE session and legacy-binding bugs after the USB reset was fixed. A fresh notification subscription must establish a new wire epoch/counter state, while same-generation subscription rearming must preserve it. The Mac must observe changed firmware epochs while idle even if the old database credential remains active, without extra STATUS reads during active audio.
+
+An old peer-to-server binding needs scoped migration, not clearing all bindings or weakening proof checks. A successful USB profile write records a one-use migration grant. Only a complete proof matching the current device/server/token may consume that profile's grant and update the valid peer binding; stale proofs, invalid peers and unrelated conflicts remain rejected. Native tests cover failed NVS writes, grant consumption, and other-profile/Wi-Fi preservation.
+
+After the user reconnected the board, final hardware acceptance covered real USB replacement, repeated adds with zero serial opens/no credential generation, a new authenticated voice epoch on reconnect, stable physical BLE generation and service/model/STT PIDs, and fresh authenticated snapshots after serial close. No ROM/reset/boot banners occurred; five Bluetooth hosts and automatic reconnect settings remained. Native UI Add also reused the record and retained both real macOS permissions. Evidence: build/usb-authorization-acceptance.json and build/usb-native-ui-acceptance.json. Coverage is one board/this Mac; other computer rows were unchanged and native regression protects other profiles/Wi-Fi, but physical second-Mac switching and full Wi-Fi provisioning were not tested.

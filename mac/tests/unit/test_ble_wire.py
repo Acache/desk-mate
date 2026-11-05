@@ -59,6 +59,79 @@ def test_mutual_auth_and_revoked_credentials():
         with pytest.raises(WireError):await authenticate(AuthChannel(key),state)
     asyncio.run(run())
 
+
+@pytest.mark.parametrize('changed,expected_code', [
+    ({'epoch': 8}, 'BLE_AUTH_REFRESH'),
+    ({'server_id': '33333333-3333-4333-8333-333333333333'}, 'BLE_TARGET_MISMATCH'),
+])
+def test_changed_auth_session_is_not_a_request_to_rotate_usb_credentials(changed, expected_code):
+    from voice_assistant.ble_bridge import connection_error
+    class ChangedChannel(AuthChannel):
+        async def receive(self):
+            value = await super().receive()
+            payload = json.loads(value['text'])
+            payload.update(changed)
+            return {'text': json.dumps(payload)}
+    async def run():
+        def unexpected_key_lookup(device):
+            pytest.fail('Changed target/session must be rejected before credential proof')
+        state = SimpleNamespace(cfg=SimpleNamespace(server=SimpleNamespace(server_id=SERVER)),
+                                db=SimpleNamespace(ble_auth_key=unexpected_key_lookup))
+        channel = ChangedChannel(b'x' * 32)
+        with pytest.raises(WireError) as error:
+            await authenticate(channel, state)
+        result = connection_error(error.value, 'authenticating')
+        assert result['error_code'] == expected_code
+        assert result['error_code'] not in ('BLE_AUTH_REQUIRED', 'BLE_AUTH_MISMATCH')
+        assert [item['type'] for item in channel.sent] == ['ble_auth_start']
+    asyncio.run(run())
+
+
+def test_idle_status_detects_epoch_change_even_when_old_credential_still_exists():
+    from voice_assistant.ble_bridge import STATUS, _check_idle_epoch, connection_error
+    class Client:
+        epoch = 7
+        reads = 0
+        async def read_gatt_char(self, uuid):
+            assert uuid == STATUS
+            self.reads += 1
+            return struct.pack('<BBHIIH', 1, 3, 247, self.epoch, 6, 2048)
+    async def run():
+        client = Client()
+        db = SimpleNamespace(active_command=lambda: None, ble_auth_key=lambda device: b'old-valid-key')
+        channel = SimpleNamespace(epoch=7)
+        await _check_idle_epoch(client, channel, db)
+        client.epoch = 8
+        with pytest.raises(WireError) as error:
+            await _check_idle_epoch(client, channel, db)
+        assert connection_error(error.value, 'authenticated')['error_code'] == 'BLE_AUTH_REFRESH'
+        assert db.ble_auth_key(DEVICE) == b'old-valid-key'
+        db.active_command = lambda: {'state': 'RECEIVING'}
+        reads = client.reads
+        await _check_idle_epoch(client, channel, db)
+        assert client.reads == reads  # No extra ATT traffic competes with audio.
+    asyncio.run(run())
+
+
+def test_stalled_idle_status_read_is_cancelled_and_recovers_as_channel_timeout():
+    from voice_assistant.ble_bridge import _check_idle_epoch, connection_error
+    class Client:
+        cancelled = False
+        async def read_gatt_char(self, uuid):
+            try:
+                await asyncio.Future()
+            finally:
+                self.cancelled = True
+    async def run():
+        client = Client()
+        with pytest.raises(WireError) as error:
+            await _check_idle_epoch(client, SimpleNamespace(epoch=7),
+                                    SimpleNamespace(active_command=lambda: None), timeout=.01)
+        assert client.cancelled
+        assert isinstance(error.value.__cause__, asyncio.TimeoutError)
+        assert connection_error(error.value, 'authenticated')['error_code'] == 'BLE_CHANNEL_TIMEOUT'
+    asyncio.run(run())
+
 class Radio:
     is_connected=True
     def __init__(self):self.writes=[];self.channel=None

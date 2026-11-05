@@ -27,7 +27,7 @@ from .contracts import (
 )
 
 MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 class StorageError(RuntimeError):
@@ -86,11 +86,8 @@ class Database:
                 f"database schema {current} is newer than this application ({SCHEMA_VERSION}); refusing to run"
             )
         for version in range(current + 1, SCHEMA_VERSION + 1):
-            suffix = "initial.sql" if version == 1 else "feedback.sql"
-            path = MIGRATIONS_DIR / f"{version:03d}_{suffix}"
-            # Only migration 001 exists under its numbered name.
-            if version == 1:
-                path = MIGRATIONS_DIR / "001_initial.sql"
+            names = {1: "001_initial.sql", 2: "002_feedback.sql", 3: "003_usb_registrations.sql"}
+            path = MIGRATIONS_DIR / names[version]
             if not path.exists():
                 raise StorageError(f"missing migration {path}")
             script = path.read_text(encoding="utf-8").replace("PRAGMA foreign_keys = ON;", "")
@@ -107,11 +104,11 @@ class Database:
             conn.execute("BEGIN IMMEDIATE")
             try:
                 yield conn
-            except BaseException:
-                conn.execute("ROLLBACK")
-                raise
-            else:
                 conn.execute("COMMIT")
+            except BaseException:
+                if conn.in_transaction:
+                    conn.execute("ROLLBACK")
+                raise
 
     def close(self) -> None:
         with self._lock:

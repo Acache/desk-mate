@@ -29,5 +29,24 @@ int main(void) {
     assert(idle_brightness_level(&state, 4998) == 100);
     assert(idle_brightness_level(&state, 5499) == 75);
     assert(idle_brightness_level(&state, 5999) == 50);
+    assert(idle_brightness_level(&state, 54998) == 50);
+    assert(idle_brightness_level(&state, 54999) == 50);
+    assert(idle_brightness_level(&state, 55499) == 38);
+    assert(idle_brightness_level(&state, 55999) == 25);
+    /* The second fade starts 60 seconds after the last input, not after dimming. */
+    idle_brightness_activity(&state, 100);
+    assert(idle_brightness_level(&state, 60099) == 50);
+    assert(idle_brightness_level(&state, 60100) == 50);
+    assert(idle_brightness_level(&state, 60600) == 38);
+    assert(idle_brightness_level(&state, 61100) == 25);
+    assert(idle_brightness_level(&state, 3600100) == 25);
+    /* Recover during the second fade, and from the lowest brightness. */
+    idle_brightness_activity(&state, 60600);
+    assert(idle_brightness_level(&state, 60600) == 100);
+    assert(idle_brightness_level(&state, 120600) == 50);
+    assert(idle_brightness_level(&state, 121600) == 25);
+    idle_brightness_activity(&state, 121600);
+    assert(idle_brightness_level(&state, 121600) == 100);
+    assert(idle_brightness_level(&state, 131599) == 100);
     return 0;
 }

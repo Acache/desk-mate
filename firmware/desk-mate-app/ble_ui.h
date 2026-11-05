@@ -1,6 +1,7 @@
 #ifndef DESKMATE_BLE_UI_H
 #define DESKMATE_BLE_UI_H
 #include "lvgl.h"
+#include "ui_update.h"
 #include "src/media_ble/ble_contracts.h"
 #include <string.h>
 #include <stdio.h>
@@ -8,6 +9,7 @@
 static BleReadSnapshot bt_read;
 static BleSubmitRequest bt_submit;
 static void (*bt_visibility)(bool open);
+static void (*bt_closed)(void);
 static BleSnapshot bt_view;
 static lv_obj_t *bt_screen,*bt_pager,*bt_panel,*bt_status,*bt_footer,*bt_rows[8],*bt_row_labels[8];
 static lv_obj_t *bt_name_input,*bt_keyboard,*bt_detail_title;
@@ -16,6 +18,7 @@ static BleHost bt_host;
 static BleHost bt_list_hosts[BLE_HOST_LIMIT];
 static int bt_screen_mode,bt_row_count,bt_selected,bt_known_count;
 static int bt_list_page;
+static int32_t bt_return_scroll_x, bt_return_scroll_y;
 static uint32_t bt_ui_generation, bt_pair_generation,bt_pair_window;
 static bool bt_wait_pair,bt_name_after_pair;
 static char bt_ui_error[64];
@@ -52,7 +55,7 @@ static bool bt_send(BleOperation op,bool value,const char *name) {
     return ok;
 }
 static lv_obj_t *bt_text(const char *text,int x,int y,int w,const lv_font_t *font,uint32_t color) {
-    lv_obj_t *o=lv_label_create(bt_panel); lv_label_set_text(o,text);
+    lv_obj_t *o=lv_label_create(bt_panel); ui_label_set_text(o,text);
     lv_obj_set_pos(o,x,y); lv_obj_set_width(o,w); lv_obj_set_style_text_font(o,font,0);
     lv_obj_set_style_text_color(o,lv_color_hex(color),0); lv_obj_set_style_text_align(o,LV_TEXT_ALIGN_CENTER,0);
     lv_label_set_long_mode(o,LV_LABEL_LONG_WRAP); return o;
@@ -62,7 +65,12 @@ static void bt_close(void) {
     if(bt_screen_mode==BT_PAIR&&!(bt_view.state==BLE_READY&&bt_view.generation!=bt_pair_generation)) bt_send(BLE_CMD_CANCEL,false,NULL);
     BT_DELETE(bt_panel); bt_panel=NULL;
     if(bt_visibility) bt_visibility(false); bt_name_input=bt_keyboard=NULL; bt_ui_generation++;
+    /* Rebuilding the media view can readjust the pager's layout/snap. Finish
+     * that work and restore its saved position before exposing another frame. */
+    lv_obj_update_layout(bt_pager);
+    lv_obj_scroll_to(bt_pager, bt_return_scroll_x, bt_return_scroll_y, LV_ANIM_OFF);
     lv_obj_add_flag(bt_pager,LV_OBJ_FLAG_SCROLLABLE);
+    if(bt_closed) bt_closed();
 }
 static void bt_back(void) {
     if(bt_screen_mode==BT_LIST) bt_close();
@@ -143,7 +151,7 @@ static void bt_button_at(const char *text,int x,int y,int w,int h,int action,uin
     lv_obj_set_style_bg_opa(b,LV_OPA_COVER,0); lv_obj_set_style_bg_color(b,lv_color_hex(0x2A3946),LV_STATE_PRESSED);
     lv_obj_add_flag(b,LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(b,bt_click,LV_EVENT_CLICKED,(void *)(intptr_t)action);
-    lv_obj_t *l=lv_label_create(b); lv_label_set_text(l,text); lv_obj_set_width(l,w-24);
+    lv_obj_t *l=lv_label_create(b); ui_label_set_text(l,text); lv_obj_set_width(l,w-24);
     lv_label_set_long_mode(l,LV_LABEL_LONG_DOT); lv_obj_set_style_text_align(l,LV_TEXT_ALIGN_CENTER,0);
     lv_obj_set_style_text_font(l,&lv_font_montserrat_16,0); lv_obj_set_style_text_color(l,lv_color_hex(color),0);
     lv_obj_center(l); lv_obj_clear_flag(l,LV_OBJ_FLAG_CLICKABLE);
@@ -251,12 +259,16 @@ static void bt_draw(int mode) {
     lv_obj_t *back=lv_obj_create(bt_panel); lv_obj_remove_style_all(back);
     lv_obj_set_pos(back,184,434); lv_obj_set_size(back,112,44); lv_obj_add_flag(back,LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(back,bt_click,LV_EVENT_CLICKED,(void *)(intptr_t)BT_BACK);
-    lv_obj_t *l=lv_label_create(back); lv_label_set_text(l,"Back"); lv_obj_set_style_text_color(l,lv_color_hex(0x858883),0);
+    lv_obj_t *l=lv_label_create(back); ui_label_set_text(l,"Back"); lv_obj_set_style_text_color(l,lv_color_hex(0x858883),0);
     lv_obj_set_style_text_font(l,&lv_font_montserrat_16,0); lv_obj_center(l); lv_obj_clear_flag(l,LV_OBJ_FLAG_CLICKABLE);
     bt_highlight();
 }
 static void bt_open(void) {
     if(bt_panel) return;
+    bt_return_scroll_x = lv_obj_get_scroll_x(bt_pager);
+    bt_return_scroll_y = lv_obj_get_scroll_y(bt_pager);
+    // Cancel any in-flight pager animation while the manager owns the input.
+    lv_obj_scroll_to(bt_pager, bt_return_scroll_x, bt_return_scroll_y, LV_ANIM_OFF);
     bt_panel=lv_obj_create(bt_screen); lv_obj_remove_style_all(bt_panel);
     lv_obj_set_size(bt_panel,480,480); lv_obj_set_pos(bt_panel,0,0);
     lv_obj_set_style_bg_color(bt_panel,lv_color_hex(0x05080A),0); lv_obj_set_style_bg_opa(bt_panel,LV_OPA_COVER,0);
@@ -292,26 +304,26 @@ static void bt_tick(void) {
         } else if(bt_screen_mode==BT_DETAIL&&bt_host_index()<0) snprintf(line,sizeof(line),"No longer paired");
         else if(bt_screen_mode==BT_DETAIL && bt_host_index()!=bt_view.current && bt_host_index()!=bt_view.selected) snprintf(line,sizeof(line),"Paired / not connected");
         else snprintf(line,sizeof(line),"%s",ble_state_label(bt_view.state));
-        lv_label_set_text(bt_status,line);
+        ui_label_set_text(bt_status,line);
     }
     if(bt_screen_mode==BT_LIST) {
         snprintf(line,sizeof(line),"Saved %u / %u  |  Page %d / %d",bt_view.count,bt_view.capacity,bt_list_page+1,bt_page_count());
-        lv_label_set_text(bt_count,line);
-        snprintf(line,sizeof(line),"Bluetooth  %s",bt_view.enabled?"ON":"PAUSED"); lv_label_set_text(bt_row_labels[0],line);
-        snprintf(line,sizeof(line),"Auto reconnect  %s",bt_view.auto_reconnect?"ON":"OFF"); lv_label_set_text(bt_row_labels[1],line);
+        ui_label_set_text(bt_count,line);
+        snprintf(line,sizeof(line),"Bluetooth  %s",bt_view.enabled?"ON":"PAUSED"); ui_label_set_text(bt_row_labels[0],line);
+        snprintf(line,sizeof(line),"Auto reconnect  %s",bt_view.auto_reconnect?"ON":"OFF"); ui_label_set_text(bt_row_labels[1],line);
         for(int n=0;n<2;n++) {
             int i=bt_list_page*2+n;
             if(i>=bt_view.count) break;
             snprintf(line,sizeof(line),"%s  /  %s",bt_view.hosts[i].name,
                 i==bt_view.current&&bt_view.state==BLE_READY?"Connected":i==bt_view.selected&&(bt_view.state==BLE_WAITING||bt_view.state==BLE_BACKGROUND||bt_view.state==BLE_CONNECTING)?"Selected":"Paired");
-            lv_label_set_text(bt_row_labels[2+n],line);
+            ui_label_set_text(bt_row_labels[2+n],line);
         }
     }
     if(bt_detail_title) {
         int i=bt_host_index();
-        if(i>=0) lv_label_set_text(bt_detail_title,bt_view.hosts[i].name);
+        if(i>=0) ui_label_set_text(bt_detail_title,bt_view.hosts[i].name);
     }
-    if(bt_footer) lv_label_set_text(bt_footer,bt_ui_error[0]?bt_ui_error:bt_view.message);
+    if(bt_footer) ui_label_set_text(bt_footer,bt_ui_error[0]?bt_ui_error:bt_view.message);
 }
 /* Physical navigation acts on the same buttons as touch. Long BOOT is Back. */
 static void bt_key(int key,bool held) {

@@ -223,6 +223,18 @@ def rule_based_proposal(text: str, context=None) -> "DecisionProposal | None":
     t = normalize_intent_text(text)
     if not t:
         return None
+    page = getattr(context,"page_context",None) if context is not None else None
+    if page:
+        if page.get("page") != "search":
+            context = context.model_copy(update={"search_snapshot":None})
+        from .context_rules import PageContext, resolve
+        decision=resolve(text,PageContext(page=str(page.get("page") or "other"),
+            home_results=list(page.get("home_results") or []),search_results=list(page.get("search_results") or []),
+            episodes=list(page.get("episodes") or []),recommendations=list(page.get("recommendations") or [])))
+        if decision:
+            return _ok([(decision["action"],decision["params"],[])]) if decision["action"]!="clarify" else _clarify(decision["why"])
+    if any(word in t for word in ("然后","并且","之后","如果","顺便","同时","而且","接着")):
+        return None
     # Light filler/punctuation tolerance without changing stored transcripts.
     t = re.sub(r"^(?:请|麻烦|帮我|帮忙|给我|现在|那个|这个)+", "", t)
     t = re.sub(r"(?:一下|吧|啊|呀|呢|谢谢)$", "", t)
@@ -330,12 +342,12 @@ def rule_based_proposal(text: str, context=None) -> "DecisionProposal | None":
         item, snap = _search_result_by_grid(context, row or 0, column or 0)
         if item is None:
             if snap is None:
-                return _clarify("请先搜索一个视频，再说第几排第几个")
+                return _clarify("无法确认当前页面的行列位置，请说可见标题或序号")
             return _clarify("当前搜索结果没有第%s排第%s个，请重新搜索" % (spatial.group(1), spatial.group(2)))
         return _ok([("bilibili.play",
                      {"index": item.index, "search_result_id": str(snap.search_result_id)}, [])])
 
-    ordinal = re.search(r"第?([0-9一二三四五六七八九十]+)个(?:视频)?", t)
+    ordinal = re.fullmatch(r"(?:播放|打开|点击|点开|观看|看|放)第?([0-9一二三四五六七八九十]+)个(?:视频)?", t)
     if ordinal and "排" not in t and "行" not in t and any(k in t for k in ("播放", "打开", "点击", "点开", "观看", "看", "放")) and not any(k in t for k in ("搜索", "搜")):
         index = _index_value(ordinal.group(1))
         snap = getattr(context, "search_snapshot", None) if context is not None else None

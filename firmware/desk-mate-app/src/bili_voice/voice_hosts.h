@@ -32,6 +32,12 @@ void vc_hosts_init();
 void vc_hosts_catalog(VoiceHostCatalog *out);
 bool vc_hosts_load(int slot, VoiceConfig *out);
 bool vc_hosts_save(const VoiceConfig *cfg, const char *name);
+bool vc_hosts_binding_pending(int slot, const char *expected_device_id);
+/* Called only with the result of the complete HMAC proof. Validates the
+ * candidate still matches NVS before consuming its one-use USB binding grant. */
+bool vc_hosts_finalize_binding(int slot, const VoiceConfig *expected,
+                             const char *peer_address, uint8_t peer_type,
+                             bool complete_proof_verified);
 bool vc_hosts_edit(const VoiceHostRequest *request);
 bool vc_hosts_remember(int slot);
 void vc_hosts_added(char out[37]);

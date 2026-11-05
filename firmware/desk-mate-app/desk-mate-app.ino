@@ -79,7 +79,7 @@ struct ButtonState {
   int active_short = 0, active_hold = 0;
   int owner_page = 0;
   uint32_t owner_layer = 0;
-  bool manager_key = false, voice_manager = false;
+  bool manager_key = false, voice_manager = false, connection_key = false;
   bool suppressed = false;
   bool timer_key = false;
 };
@@ -96,17 +96,18 @@ static void poll_button(ButtonState &b, int short_action, int hold_action) {
     if (b.stable) {
       b.pressed_at = now; b.repeat_at = now + 1400; b.held = false;
       b.owner_page = focus_page;
-      b.owner_layer = (bt_input_generation()+vh_generation);
-      b.manager_key = bt_is_open();b.voice_manager=vh_is_open();
-      b.suppressed = (focus_page == PAGE_BILI && !b.voice_manager) || power_hold_visible(&power_hold);
-      b.timer_key = focus_page == PAGE_FOCUS && b.pin == 10;
+      b.owner_layer = (bt_input_generation()+vh_generation+conn_generation);
+      b.manager_key = bt_is_open();b.voice_manager=vh_is_open();b.connection_key=conn_panel!=NULL;
+      b.suppressed = (focus_page == PAGE_BILI && !b.voice_manager && !b.connection_key && !b.manager_key) || power_hold_visible(&power_hold);
+      b.timer_key = focus_page == PAGE_FOCUS && b.pin == 10 && !b.manager_key && !b.voice_manager && !b.connection_key;
       b.active_short = b.suppressed ? -100 : (focus_page == PAGE_FOCUS ? (b.pin == 9 ? 7 : 8) : short_action);
       b.active_hold = b.suppressed ? -100 : (focus_page == PAGE_FOCUS ? (b.pin == 9 ? 7 : 9) : hold_action);
-    } else if (b.suppressed || power_hold_visible(&power_hold) || b.owner_page != focus_page || b.owner_layer != (bt_input_generation()+vh_generation)) {
+    } else if (b.suppressed || power_hold_visible(&power_hold) || b.owner_page != focus_page || b.owner_layer != (bt_input_generation()+vh_generation+conn_generation)) {
       Serial.printf("BUTTON %u release suppressed (owner=%d page=%d)\n", b.pin, b.owner_page, focus_page);
     } else if (!b.held) {
       Serial.printf("BUTTON %u tap action=%d\n", b.pin, b.active_short);
-      if(b.voice_manager)vh_key(b.pin,false);
+      if(b.connection_key)conn_key(b.pin,false);
+      else if(b.voice_manager)vh_key(b.pin,false);
       else if (b.manager_key) bt_key(b.pin, false);
       else focus_action(b.active_short);
     } else if (b.timer_key) {
@@ -122,9 +123,10 @@ static void poll_button(ButtonState &b, int short_action, int hold_action) {
   if (b.stable) bsp_display_activity();
   if (b.stable && !b.held && now - b.pressed_at >= 700) {
     b.held = true;
-    if (!b.suppressed && !power_hold_visible(&power_hold) && b.owner_page == focus_page && b.owner_layer == (bt_input_generation()+vh_generation)) {
+    if (!b.suppressed && !power_hold_visible(&power_hold) && b.owner_page == focus_page && b.owner_layer == (bt_input_generation()+vh_generation+conn_generation)) {
       Serial.printf("BUTTON %u hold action=%d\n", b.pin, b.active_hold);
-      if(b.voice_manager)vh_key(b.pin,true);
+      if(b.connection_key)conn_key(b.pin,true);
+      else if(b.voice_manager)vh_key(b.pin,true);
       else if (b.manager_key) bt_key(b.pin, true);
       else focus_action(b.active_hold);
     }
@@ -150,7 +152,8 @@ void loop() {
       if (power_events || power_hold.down) bsp_display_activity();
       if (power_tap) {
         Serial.println("BUTTON PWR tap");
-        if(vh_is_open()){vh_key(0,false);
+        if(conn_panel){conn_key(0,false);
+        } else if(vh_is_open()){vh_key(0,false);
         } else if (bt_is_open()) {
           bt_key(0, false);
         } else if (focus_page == PAGE_BILI) {

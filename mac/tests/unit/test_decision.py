@@ -111,3 +111,11 @@ def test_full_search_context_keeps_indices_with_a_total_title_budget():
     assert len(cards)==50
     assert sum(len(card["title"]) for card in cards)<=2400
     assert cards[-1]["index"]==50 and cards[-1]["title_truncated"]
+
+
+def test_home_context_is_sent_to_model_without_old_search_snapshot():
+    from voice_assistant.contracts import TrustedContext
+    from voice_assistant.decision import _context_payload
+    ctx=TrustedContext(now=time.time(),page_context={'page':'home','home_results':[{'bvid':'BV1xx411c7mD','title':'首页卡片'}]})
+    payload=_context_payload(ctx,'给我挑个合适的视频')
+    assert payload['page']['home_results'][0]['video_id']=='BV1xx411c7mD'

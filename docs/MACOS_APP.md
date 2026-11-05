@@ -12,8 +12,8 @@
 
 1. 将 `Desk-Mate.app` 放到固定位置（通常 `/Applications`）并启动。菜单栏展示加载和服务状态。
 2. 在“权限与首次使用”中给安装后的 App 授予辅助功能、屏幕录制和蓝牙权限。需要时退出并重开 App。权限不能随安装包预授权；开发版依赖 Terminal 的方式不适用于最终验收。
-3. 用 USB 连接设备，选择“通过 USB 授权设备”。界面会明确说明这会替换设备原来的服务端授权；没有用户点击不进行授权。
-4. 在设备第2屏连接该 Mac，使用“选择或切换蓝牙输入”选择实际设备。服务运行时直接切换 BLE 通道，STT、Ollama 和服务保持运行；服务停止时保存选择，下一次启动自动连接。新板子仍需先完成 USB 授权。
+3. 新设备首次使用时，用 USB 连接设备，选择“添加设备…”。已保存的同一 USB 板授权记录会直接复用，不会再次打开串口或换密钥；明确重新授权在高级设置中。见 [USB 授权与日常连接](USB_AUTHORIZATION.md)。
+4. 在设备连接面板选择该 Mac，服务端使用“选择设备”选择实际输入。日常断线可用“重新连接”，只重建 BLE 通道，STT、Ollama 和服务保持运行，无需再次 USB 授权。
 5. 点击“打开 B站并启用本地控制”：客户端未运行时直接带参数启动；已有本地控制连接时直接使用；正在运行但缺少参数时，只有明确确认后才重启。没有打开视频时会提示“已启用，请打开视频”。
 6. 第3屏进行语音真机测试；STT/决策模型就绪和 BLE 认证成功、B站实际动作成功是不同的验收项。
 
@@ -21,7 +21,7 @@
 
 0.2.1 增加“断开蓝牙输入”，并显示当前输入设备和中文连接阶段。选择被接受不等于认证成功，界面会继续显示连接进度；完成认证后才提示连接成功。语音任务进行中会拒绝切换并提示稍后重试。USB 未授权、授权不匹配、设备未选中 Mac、权限不足、超时及 B站端口占用均有具体错误和处理建议；相同后台错误不会反复弹窗。
 
-升级请先退出旧 App，再替换为新版本。已有 Application Support 数据和设备授权不随替换而清空。当前最新版包为 `build/release/Desk-Mate-macOS-arm64-0.2.1.zip`。
+升级请先退出旧 App，再替换为新版本。已有 Application Support 数据和设备授权不随替换而清空。当前本机发布路径固定为 `build/usability-release/Desk-Mate.app`，版本 0.3.2（本轮 build 14）；不要使用日期目录副本。更新流程见 [发布与上下文约定](RELEASE_AND_CONTEXT_2026-11-05.md)。
 
 ## 构建
 
@@ -37,7 +37,8 @@ python3 mac/scripts/build_app.py \
   --ollama-models /path/to/ollama-model-store \
   --stt-model /path/to/SenseVoiceSmall \
   --model qwen2.5:1.5b \
-  --output build/release/Desk-Mate.app
+  --identity local \
+  --output build/usability-release/Desk-Mate.app
 ```
 
 构建过程：
@@ -48,7 +49,13 @@ python3 mac/scripts/build_app.py \
 - 将外部原生库收进 bundle，重写加载路径，拒绝未解析或逃出 bundle 的依赖。
 - 对修改过的二进制重新签名并进行严格签名检查，再用内置 Python 检查关键模块导入。
 
-默认 `--identity -` 是本机 ad-hoc 签名。对外正式交付需要 Developer ID 签名、公证、staple 和另一台干净 Mac 的 Gatekeeper 验证；本机构建通过不能替代这些步骤。模型和第三方组件的许可证随包保留，正式发布前需核对完整分发许可。
+本机增量验证请用 `python3 mac/scripts/update_local_app.py`，在原路径事务式替换并自动递增 build；不重置权限或用户数据。暂存 `.app` 只用于构建与签名，禁止执行；原生检查只在正式路径进行。“重新检测”在运行中的主 App 内调用原生授权 API，不重启 STT/Ollama。普通状态刷新只读取原生 preflight，不触发授权提示。主进程实际观察结果记录于用户数据目录的 `permission-status.json`，命令行子进程的权限不能代替 App 权限。
+
+本机增量更新默认使用固定的本地自签名证书，首次在 `~/Library/Application Support/desk-mate/signing` 创建，后续只复用同一身份。目录权限为 700，钥匙串及密码文件为 600，私钥以不可导出方式导入独立钥匙串；不进入项目或发布包，不更改系统信任或钥匙串搜索列表。丢失、损坏或不匹配时发布会中止，避免悄悄换身份。发布结果打印证书指纹与 designated requirement；同一证书的不同构建会互相验证该要求。显式 `--identity <证书>` 可覆盖默认值；全量本机构建请指定 `build_app.py --identity local`。
+
+从之前的 ad-hoc 构建切换到该固定证书，需要用户在系统设置中给正式 `Desk-Mate.app` 重新关联一次授权。本机已在用户明确允许后完成这两项关联，并实测 build 9 → build 10 更新无需再次授权，主 App 两项原生 preflight 连续多个周期均为 true。旧 `.Desk-Mate-staging.app` 名称如仍出现在已打开的系统设置窗口中，退出并重开系统设置可刷新缓存；不要因此再次切换权限。应用不会读取旧记录冒充授权。
+
+全量分发构建的默认 `--identity -` 仍是 ad-hoc 签名；本地自签名证书也不能替代对外正式交付需要的 Developer ID 签名、公证、staple 和另一台干净 Mac 的 Gatekeeper 验证。模型和第三方组件的许可证随包保留，正式发布前需核对完整分发许可。
 
 ## 决策评测
 

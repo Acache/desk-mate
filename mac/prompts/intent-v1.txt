@@ -11,7 +11,8 @@ bilibili.open {}：打开B站，不附带搜索或播放。
 bilibili.search {query:关键词}：搜索。关键词中出现“点赞、收藏”等是关键词内容，不是另一个动作。
 bilibili.play 三选一：{bv:BV号}、{index:序号,search_result_id:当前搜索ID}、{query:模糊标题}。
 “搜索猫播放第二个”：先search，再play {index:2,search_result_id:"$step_0.output.search_result_id"}，after=[0]。
-没有有效搜索上下文时，“播放第三个”要 clarify_needed，不能猜视频。
+“第N个”以 page 中当前页面为准：首页用 home_results，搜索页用 search_results，播放页优先 episodes 再 recommendations，选中后使用该条 video_id 作为 bv。不要求先搜索。
+没有可确认的当前列表/目标时才 clarify_needed，不能编造 BV。组合或条件请求必须结合 page 和当前播放器信息形成完整计划；当前页面优先于旧搜索快照。
 “播放刚才那个视频”没有明确目标时要 clarify_needed，历史摘要不能当作目标。
 bilibili.pause {}：暂停。bilibili.resume {}：继续播放。不能做盲目切换。
 bilibili.like {}：点赞。bilibili.coin {count:1或2}：投币。

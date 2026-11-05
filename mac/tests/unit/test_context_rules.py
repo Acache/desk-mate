@@ -86,3 +86,63 @@ def test_duplicates_and_invalid_bvids_are_dropped():
 
 def test_unrelated_text_is_left_to_the_normal_rules():
     assert resolve("暂停", PageContext(page="search", search_results=SEARCH)) is None
+
+
+def test_home_ordinal_needs_no_prior_search():
+    ctx = PageContext(page='home', home_results=SEARCH)
+    assert resolve('播放第二个视频', ctx)['params']['bv'] == SEARCH[1]['bvid']
+
+
+def test_compound_request_is_not_reduced_to_one_ordinal_action():
+    ctx = PageContext(page='home', home_results=SEARCH)
+    assert resolve('播放第二个视频然后快进30秒', ctx) is None
+
+
+def test_ambiguous_title_does_not_choose_the_first_match():
+    ctx = PageContext(page='home', home_results=[
+        {'bvid':'BV1xx411c7mD','title':'猫咪的一天'},
+        {'bvid':'BV1yy411c7mD','title':'猫咪的旅行'}])
+    assert resolve('打开猫咪',ctx)['action'] == 'clarify'
+
+
+def test_open_app_is_not_hijacked_by_a_visible_title():
+    ctx = PageContext(page='home', home_results=[{'bvid':'BV1xx411c7mD','title':'B站'}])
+    assert resolve('打开B站',ctx) is None
+
+
+def test_actual_rule_to_plan_home_play_without_search():
+    import time
+    from voice_assistant import contracts
+    from voice_assistant.intent import rule_based_proposal
+    from voice_assistant.planner import build_plan
+    ctx=contracts.TrustedContext(now=time.time(),page_context={"page":"home","home_results":SEARCH})
+    proposal=rule_based_proposal("播放第二个视频",ctx)
+    plan=build_plan(proposal,command_id="00000000-0000-4000-8000-000000000001",device_id="00000000-0000-4000-8000-000000000002",enabled_actions=contracts.ENABLED_ACTIONS,context=ctx)
+    assert plan.actions[0].params == {"bv":SEARCH[1]["bvid"]}
+    assert rule_based_proposal("播放第二个视频然后快进30秒",ctx) is None
+
+
+def test_visible_target_guard_rejects_invented_bv():
+    from voice_assistant import contracts
+    from voice_assistant.context_rules import guard_visible_targets
+    p=contracts.DecisionProposal(status=contracts.DecisionStatus.ok,reason_code=contracts.ReasonCode.none,
+        actions=[contracts.ActionStep(id=0,action="bilibili.play",params={"bv":"BV1xx411c7mD"})])
+    assert guard_visible_targets(p,"放个相关视频",{"page":"home","home_results":SEARCH}).actions == []
+    assert guard_visible_targets(p,"播放BV1xx411c7mD",{"page":"home","home_results":SEARCH}) == p
+
+
+def test_model_ordinal_binds_to_home_instead_of_old_search_id():
+    from voice_assistant import contracts
+    from voice_assistant.context_rules import guard_visible_targets
+    p=contracts.DecisionProposal(status=contracts.DecisionStatus.ok,reason_code=contracts.ReasonCode.none,
+        actions=[contracts.ActionStep(id=0,action="bilibili.play",params={"index":2,"search_result_id":"00000000-0000-4000-8000-000000000001"})])
+    result=guard_visible_targets(p,"选第二个然后继续",{"page":"home","home_results":SEARCH})
+    assert result.actions[0].params=={"bv":SEARCH[1]["bvid"]}
+
+
+def test_ordinal_with_additional_volume_request_reaches_model():
+    import time
+    from voice_assistant.contracts import TrustedContext
+    from voice_assistant.intent import rule_based_proposal
+    ctx=TrustedContext(now=time.time(),page_context={"page":"home","home_results":SEARCH})
+    assert rule_based_proposal("播放第二个视频顺便把音量调小",ctx) is None

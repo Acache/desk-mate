@@ -241,10 +241,11 @@ def build(args) -> Path:
                        "This development bundle is not notarized unless the release pipeline signs and notarizes it.\n")
     if not (resources/"ollama/LICENSE").exists():
         raise ValueError("include Ollama LICENSE in its runtime distribution")
+    app_version=json.loads((REPO/"mac/app/version.json").read_text())
     info = {"CFBundleExecutable":"DeskMate","CFBundleIdentifier":"com.desk-mate.server",
             "CFBundleName":"Desk-Mate","CFBundleDisplayName":"Desk-Mate",
-            "CFBundlePackageType":"APPL","CFBundleShortVersionString":"0.2.1","CFBundleVersion":"3",
-            "LSUIElement":True,"LSMinimumSystemVersion":"14.0","NSHighResolutionCapable":True,
+            "CFBundlePackageType":"APPL","CFBundleShortVersionString":app_version["version"],"CFBundleVersion":str(app_version["build"]),
+            "LSUIElement":False,"LSMinimumSystemVersion":"14.0","NSHighResolutionCapable":True,
             "NSBluetoothAlwaysUsageDescription":"连接 Desk-Mate，接收语音指令并回传执行结果。",
             "NSBluetoothPeripheralUsageDescription":"连接 Desk-Mate 蓝牙设备。",
             "NSLocalNetworkUsageDescription":"发现并连接本地 Desk-Mate 设备。",
@@ -280,11 +281,26 @@ def finish_app(app: Path, identity: str = "-") -> None:
     env.pop("PYTHONHOME",None)
     # Dynamic-link edits invalidate signatures; resign BEFORE loading Python.
     entitlements = REPO/"mac/app/entitlements.plist"
-    for path in files:
-        run("/usr/bin/codesign","--force","--sign",identity,"--options","runtime",
-            "--entitlements",entitlements,path,capture_output=True)
-    run("/usr/bin/codesign","--force","--sign",identity,"--options","runtime",app,capture_output=True)
-    run("/usr/bin/codesign","--verify","--deep","--strict",app,capture_output=True)
+    signing=["--sign",identity]
+    local_identity=None
+    if identity=="local":
+        from local_signing import ensure_local_identity
+        local_identity=ensure_local_identity()
+        signing=["--sign",local_identity["identity"],"--keychain",local_identity["keychain"]]
+    try:
+        if local_identity:
+            metadata.update(signed_identity=local_identity["identity"],signing_kind="local-certificate")
+            metadata_path.write_text(json.dumps(metadata,indent=2)+"\n")
+        for path in files:
+            run("/usr/bin/codesign","--force",*signing,"--options","runtime",
+                "--entitlements",entitlements,path,capture_output=True)
+        run("/usr/bin/codesign","--force",*signing,"--options","runtime",app,capture_output=True)
+        run("/usr/bin/codesign","--verify","--deep","--strict",app,capture_output=True)
+        if local_identity:
+            from local_signing import verify_local_signature
+            verify_local_signature(app,local_identity["identity"],info["CFBundleIdentifier"])
+    finally:
+        if local_identity:run("/usr/bin/security","lock-keychain",local_identity["keychain"],capture_output=True)
     run(resources/"python/bin/python3","-c",
         "import ssl, sqlite3, torch, torchaudio, funasr, bleak, serial, websockets; import voice_assistant.api; print('Bundled imports OK')",env=env,cwd=app.parent)
     print(f"Built {app}",flush=True)
@@ -299,7 +315,7 @@ def main():
     p.add_argument("--stt-model",type=Path,required=True)
     p.add_argument("--model",default="qwen2.5:1.5b")
     p.add_argument("--output",type=Path,required=True)
-    p.add_argument("--identity",default="-",help="Developer ID identity; '-' is local ad-hoc signing")
+    p.add_argument("--identity",default="-",help="Certificate identity, 'local' to reuse this Mac's stable identity, or '-' for ad-hoc")
     build(p.parse_args())
 
 

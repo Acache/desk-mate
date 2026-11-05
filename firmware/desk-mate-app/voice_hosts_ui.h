@@ -1,6 +1,7 @@
 #ifndef DESKMATE_VOICE_HOSTS_UI_H
 #define DESKMATE_VOICE_HOSTS_UI_H
 #include "lvgl.h"
+#include "ui_update.h"
 #include "src/bili_voice/voice_host_model.h"
 #include <stdio.h>
 #include <string.h>
@@ -8,6 +9,8 @@ static VoiceHostRead vh_read;
 static VoiceHostSubmit vh_submit;
 static VoiceHostGate vh_gate;
 static void (*vh_visibility)(bool);
+static void (*vh_closed)(void);
+static int vh_root_mode=1;
 static lv_obj_t *vh_parent,*vh_pager,*vh_panel,*vh_rows[8],*vh_input,*vh_keyboard,*vh_status;
 static VoiceHostView vh_view;
 static VoiceHost vh_selected_host;
@@ -15,8 +18,8 @@ static int vh_mode,vh_row_count,vh_selected_row,vh_page,vh_actions[8];
 static uint32_t vh_generation,vh_added_revision;
 static char vh_error[64],vh_added_before[37],vh_recent_id[37],vh_recent_result[64];
 static VoiceHost vh_recent_host;
-enum { VH_UI_LIST=1,VH_UI_DETAIL,VH_UI_SWITCH,VH_UI_SETTINGS,VH_UI_REMOVE,VH_UI_RENAME,VH_UI_ADD,VH_UI_NETWORK,VH_UI_DIAGNOSE,VH_UI_SETUP,VH_UI_ADDED,VH_UI_HISTORY };
-enum { VH_UI_BACK=100,VH_UI_NEXT_PAGE,VH_UI_DO_CONNECT,VH_UI_SETTINGS_ACTION,VH_UI_REMOVE_ACTION,VH_UI_CONFIRM_REMOVE,VH_UI_RENAME_ACTION,VH_UI_SAVE_NAME,VH_UI_DEFAULT_ACTION,VH_UI_DISCONNECT_ACTION,VH_UI_ADD_ACTION,VH_UI_NETWORK_ACTION,VH_UI_DIAGNOSE_ACTION,VH_UI_RETRY_NETWORK,VH_UI_SETUP_ACTION,VH_UI_CANCEL_SETUP,VH_UI_CONNECT_ADDED,VH_UI_USE_BLE,VH_UI_USE_WIFI };
+enum { VH_UI_LIST=1,VH_UI_DETAIL,VH_UI_SWITCH,VH_UI_SETTINGS,VH_UI_REMOVE,VH_UI_RENAME,VH_UI_ADD,VH_UI_NETWORK,VH_UI_DIAGNOSE,VH_UI_SETUP,VH_UI_ADDED,VH_UI_HISTORY,VH_UI_TRANSPORT };
+enum { VH_UI_BACK=100,VH_UI_NEXT_PAGE,VH_UI_DO_CONNECT,VH_UI_SETTINGS_ACTION,VH_UI_REMOVE_ACTION,VH_UI_CONFIRM_REMOVE,VH_UI_RENAME_ACTION,VH_UI_SAVE_NAME,VH_UI_DEFAULT_ACTION,VH_UI_DISCONNECT_ACTION,VH_UI_ADD_ACTION,VH_UI_NETWORK_ACTION,VH_UI_DIAGNOSE_ACTION,VH_UI_RETRY_NETWORK,VH_UI_SETUP_ACTION,VH_UI_CANCEL_SETUP,VH_UI_CONNECT_ADDED,VH_UI_USE_BLE,VH_UI_USE_WIFI,VH_UI_COMPUTERS };
 static void vh_draw(int mode);
 static bool vh_is_open(void){return vh_panel!=NULL;}
 static void vh_snapshot(void){if(vh_read)vh_read(&vh_view);}
@@ -33,9 +36,11 @@ static void vh_close(void){
  if(vh_visibility)vh_visibility(false);
  if(vh_gate)vh_gate(false);
  lv_obj_add_flag(vh_pager,LV_OBJ_FLAG_SCROLLABLE);
+ if(vh_closed)vh_closed();
 }
 static void vh_back(void){
- if(vh_mode==VH_UI_LIST)vh_close();
+ if(vh_mode==vh_root_mode)vh_close();
+ else if(vh_mode==VH_UI_LIST)vh_draw(vh_root_mode);
  else if(vh_mode==VH_UI_SETUP){vh_send(VH_CANCEL_SETUP,NULL);vh_draw(VH_UI_NETWORK);}
  else if(vh_mode==VH_UI_SETTINGS||vh_mode==VH_UI_SWITCH||vh_mode==VH_UI_DIAGNOSE)vh_draw(VH_UI_DETAIL);
  else if(vh_mode==VH_UI_RENAME||vh_mode==VH_UI_REMOVE)vh_draw(VH_UI_SETTINGS);
@@ -61,8 +66,9 @@ static void vh_activate(int action){
  case VH_UI_ADD_ACTION:if(vh_count(&vh_view.catalog)>=VH_CAPACITY){snprintf(vh_error,sizeof(vh_error),"Capacity full; remove a computer");break;}snprintf(vh_added_before,37,"%s",vh_view.added_id);vh_added_revision=vh_view.provision_revision;vh_draw(VH_UI_ADD);break;
  case VH_UI_NETWORK_ACTION:vh_draw(VH_UI_NETWORK);break;
  case VH_UI_DIAGNOSE_ACTION:vh_draw(VH_UI_DIAGNOSE);break;
- case VH_UI_USE_BLE:vh_send(VH_TRANSPORT_BLE,NULL);vh_draw(VH_UI_NETWORK);break;
- case VH_UI_USE_WIFI:vh_send(VH_TRANSPORT_WIFI,NULL);vh_draw(VH_UI_NETWORK);break;
+ case VH_UI_USE_BLE:vh_send(VH_TRANSPORT_BLE,NULL);vh_draw(VH_UI_TRANSPORT);break;
+ case VH_UI_USE_WIFI:vh_send(VH_TRANSPORT_WIFI,NULL);vh_draw(VH_UI_TRANSPORT);break;
+ case VH_UI_COMPUTERS:vh_draw(VH_UI_LIST);break;
  case VH_UI_RETRY_NETWORK:vh_send(VH_RETRY_WIFI,NULL);break;
  case VH_UI_SETUP_ACTION:if(vh_send(VH_SETUP_WIFI,NULL))vh_draw(VH_UI_SETUP);break;
  case VH_UI_CANCEL_SETUP:vh_send(VH_CANCEL_SETUP,NULL);vh_draw(VH_UI_NETWORK);break;
@@ -70,7 +76,7 @@ static void vh_activate(int action){
 }
 static void vh_click(lv_event_t *e){if(lv_event_get_code(e)==LV_EVENT_CLICKED)vh_activate((int)(intptr_t)lv_event_get_user_data(e));}
 static lv_obj_t *vh_text(const char *text,int y,const lv_font_t *font,uint32_t color){
- lv_obj_t *l=lv_label_create(vh_panel);lv_label_set_text(l,text);lv_obj_set_pos(l,64,y);lv_obj_set_width(l,352);
+ lv_obj_t *l=lv_label_create(vh_panel);ui_label_set_text(l,text);lv_obj_set_pos(l,64,y);lv_obj_set_width(l,352);
  lv_obj_set_style_text_font(l,font,0);lv_obj_set_style_text_color(l,lv_color_hex(color),0);
  lv_obj_set_style_text_align(l,LV_TEXT_ALIGN_CENTER,0);lv_label_set_long_mode(l,LV_LABEL_LONG_WRAP);return l;
 }
@@ -80,7 +86,7 @@ static void vh_button(const char *text,int y,int action,bool primary){
  lv_obj_clear_flag(b,LV_OBJ_FLAG_SCROLLABLE|LV_OBJ_FLAG_SCROLL_ON_FOCUS);lv_obj_add_flag(b,LV_OBJ_FLAG_CLICKABLE);
  lv_obj_set_style_radius(b,16,0);lv_obj_set_style_bg_color(b,lv_color_hex(primary?0x8CBCE5:0x151B20),0);lv_obj_set_style_bg_opa(b,LV_OPA_COVER,0);
  lv_obj_add_event_cb(b,vh_click,LV_EVENT_CLICKED,(void *)(intptr_t)action);
- lv_obj_t *l=lv_label_create(b);lv_label_set_text(l,text);lv_obj_set_width(l,316);lv_label_set_long_mode(l,LV_LABEL_LONG_DOT);
+ lv_obj_t *l=lv_label_create(b);ui_label_set_text(l,text);lv_obj_set_width(l,316);lv_label_set_long_mode(l,LV_LABEL_LONG_DOT);
  lv_obj_set_style_text_font(l,&lv_font_montserrat_20,0);lv_obj_set_style_text_color(l,lv_color_hex(primary?0x050606:0xF3EFE7),0);
  lv_obj_set_style_text_align(l,LV_TEXT_ALIGN_CENTER,0);lv_obj_center(l);lv_obj_clear_flag(l,LV_OBJ_FLAG_CLICKABLE);vh_rows[n]=b;vh_actions[n]=action;
 }
@@ -94,7 +100,7 @@ static void vh_draw(int mode){
   int count=vh_count(&vh_view.catalog);snprintf(text,sizeof(text),"VOICE COMPUTERS  %d / 5",count);vh_text(text,110,&lv_font_montserrat_20,0x8CBCE5);
   int per=count>3?2:3;if(vh_page*per>=count)vh_page=0;int shown=0,ordinal=0;for(int i=0;i<VH_CAPACITY;i++)if(vh_view.catalog.hosts[i].present){
    if(ordinal++/per!=vh_page)continue;
-   snprintf(text,sizeof(text),"%s%s%s",i==vh_view.catalog.active?"> ":"",vh_view.catalog.hosts[i].name,i==vh_view.catalog.preferred?" *":"");vh_button(text,150+shown++*53,i,false);
+   snprintf(text,sizeof(text),"%s%s%s",i==vh_view.catalog.active?"Current: ":"",vh_view.catalog.hosts[i].name,i==vh_view.catalog.preferred?" / Default":"");vh_button(text,150+shown++*53,i,false);
   }
   if(!count)vh_text("No computers saved",185,&lv_font_montserrat_24,0xA0A6A5);
   if(count>3)vh_button("MORE COMPUTERS >",260,VH_UI_NEXT_PAGE,false);
@@ -134,10 +140,17 @@ static void vh_draw(int mode){
   vh_text("Existing computers are kept.\nWaiting for USB authorization...",290,&lv_font_montserrat_16,0x8CBCE5);
  }else if(mode==VH_UI_NETWORK){
   bool ascii=true;for(const unsigned char *c=(const unsigned char *)vh_view.ssid;*c;c++)if(*c>=128)ascii=false;
-  vh_text(vh_view.ble_mode?"BLUETOOTH VOICE":"WI-FI VOICE",122,&lv_font_montserrat_24,0xF3EFE7);
-  vh_text(vh_view.ble_mode?"Uses the Mac selected on page 2.\nStart the Mac assistant to talk.":(vh_view.wifi?(ascii?vh_view.ssid:"WI-FI CONNECTED"):"WI-FI NOT CONNECTED"),175,&lv_font_montserrat_16,0xA0A6A5);
-  vh_button("USE BLUETOOTH",244,VH_UI_USE_BLE,vh_view.ble_mode);vh_button("USE WI-FI",298,VH_UI_USE_WIFI,!vh_view.ble_mode);
-  vh_button("CHANGE WI-FI",352,VH_UI_SETUP_ACTION,false);
+  vh_text("WI-FI NETWORK",122,&lv_font_montserrat_24,0xF3EFE7);
+  vh_text(vh_view.wifi?(ascii?vh_view.ssid:"WI-FI CONNECTED"):"NOT CONNECTED",175,&lv_font_montserrat_20,0x8CBCE5);
+  vh_text("Network connection is separate\nfrom voice readiness.",220,&lv_font_montserrat_16,0xA0A6A5);
+  vh_button("RECONNECT WI-FI",290,VH_UI_RETRY_NETWORK,false);
+  vh_button("SET UP / CHANGE NETWORK",350,VH_UI_SETUP_ACTION,true);
+ }else if(mode==VH_UI_TRANSPORT){
+  vh_text("VOICE CONNECTION",118,&lv_font_montserrat_24,0xF3EFE7);
+  vh_text(vh_view.ble_mode?"Bluetooth: follows your selected device":"Wi-Fi: uses an authorized computer",166,&lv_font_montserrat_16,0xA0A6A5);
+  vh_button(vh_view.ble_mode?"BLUETOOTH / SELECTED":"USE BLUETOOTH",226,VH_UI_USE_BLE,vh_view.ble_mode);
+  vh_button(vh_view.ble_mode?"USE WI-FI":"WI-FI / SELECTED",285,VH_UI_USE_WIFI,!vh_view.ble_mode);
+  vh_button("WI-FI COMPUTERS >",350,VH_UI_COMPUTERS,false);
  }else if(mode==VH_UI_SETUP){
   vh_text("USE YOUR PHONE",125,&lv_font_montserrat_24,0xF3EFE7);
   vh_text("Join: Desk-Mate-Voice\nPassword: deskmate\nOpen: http://192.168.4.1\nSelect a 2.4GHz Wi-Fi network",181,&lv_font_montserrat_16,0x8CBCE5);
@@ -154,7 +167,7 @@ static void vh_draw(int mode){
  vh_status=vh_text("",427,&lv_font_montserrat_16,0xE8B66D);lv_obj_set_width(vh_status,240);lv_obj_set_x(vh_status,120);lv_label_set_long_mode(vh_status,LV_LABEL_LONG_DOT);vh_highlight();
 }
 static bool vh_open(void){
- if(vh_panel)return true;vh_snapshot();
+ if(vh_panel)return true;vh_root_mode=VH_UI_LIST;vh_snapshot();
  if(vh_view.command_busy||vh_view.catalog.switching||!vh_gate||!vh_gate(true))return false;
  if(vh_visibility)vh_visibility(true);
  vh_panel=lv_obj_create(vh_parent);lv_obj_remove_style_all(vh_panel);lv_obj_set_size(vh_panel,480,480);lv_obj_set_style_bg_color(vh_panel,lv_color_hex(0),0);lv_obj_set_style_bg_opa(vh_panel,LV_OPA_COVER,0);
@@ -195,6 +208,6 @@ static void vh_tick(void){
   int selected=vh_selected_row;vh_draw(vh_mode);if(selected<vh_row_count){vh_selected_row=selected;vh_highlight();}
  }
  const char *message=vh_error[0]?vh_error:vh_view.catalog.switching?"CONNECTING...":vh_view.message;
- if(vh_status)lv_label_set_text(vh_status,message);
+ if(vh_status)ui_label_set_text(vh_status,message);
 }
 #endif

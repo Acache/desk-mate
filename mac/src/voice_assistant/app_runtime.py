@@ -232,6 +232,40 @@ def export_diagnostics(root: Path, resources: Path, output: Path) -> None:
     os.chmod(output,0o600)
 
 
+def usb_pair_result(summary: dict) -> dict:
+    # A stored USB registration is history, not proof that the selected board
+    # currently holds the credential or has an authenticated live connection.
+    if summary.get("unchanged"):
+        result={"ok":True,"code":"USB_ALREADY_REGISTERED","message":"已有本机授权记录",
+                "hint":"未打开 USB 或更换凭据。请使用重新连接；若设备端授权已清空，可在高级设置中重新授权。",
+                "data":summary}
+    else:
+        result={"ok":True,"code":"USB_PAIRED","message":"USB 授权已写入设备",
+                "hint":"请查看连接状态。只有首次连接才需在设备上选择这台 Mac；已配对设备可使用“重新连接”，无需再次授权。",
+                "data":summary}
+    if summary.get("warning"):
+        result["detail"]=str(summary["warning"])
+    return result
+
+
+def operation_error(command: str, exc: Exception) -> dict:
+    if command == "scan":
+        from .ble_bridge import connection_error
+        info=connection_error(exc,"scanning")
+        return {"ok":False,"code":info["error_code"],"message":info["message"],"hint":info["hint"]}
+    code=getattr(exc,"code","USB_PAIR_FAILED") if command == "pair" else "OPERATION_FAILED"
+    if code == "COMMAND_BUSY":
+        message,hint="正在处理语音任务，暂时不能更改设备授权","请等当前录音、执行或确认结束后再试；无需重启服务"
+    elif code == "USB_AUTH_HISTORY_INVALID":
+        message,hint="本机 USB 授权记录无法读取","原记录和设备凭据已保留。请先检查诊断信息，不要反复重新授权。"
+    elif code == "USB_AUTH_SAVE_FAILED":
+        message,hint="设备已接收新凭据，但本机授权记录保存失败","请先修复本机存储问题，再到高级设置重新授权；不要反复点击添加设备。"
+    else:
+        message="USB 授权未完成" if command == "pair" else "操作未能完成"
+        hint="请检查 USB 数据线、设备唤醒状态及端口是否被其他程序占用" if command == "pair" else "请查看诊断状态并重试"
+    return {"ok":False,"code":code,"message":message,"hint":hint,"detail":str(exc)[:180]}
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--resources",type=Path,required=True)
@@ -248,10 +282,12 @@ def main(argv=None) -> int:
     selection=sub.add_parser("select-device")
     selection.add_argument("--address")
     selection.add_argument("--name",default="")
+    sub.add_parser("reconnect")
     export = sub.add_parser("export")
     export.add_argument("--output",type=Path,required=True)
     pair = sub.add_parser("pair")
     pair.add_argument("--serial-port",required=True)
+    pair.add_argument("--force",action="store_true",help="Explicitly replace this USB device's current-server credential")
     args = p.parse_args(argv)
     if args.command == "serve":
         return supervise(args)
@@ -272,6 +308,11 @@ def main(argv=None) -> int:
         result=select_device(args.root,args.address,args.name)
         print(json.dumps(result,ensure_ascii=False))
         return 0 if result["ok"] else 1
+    elif args.command == "reconnect":
+        from .desktop_control import request_reconnect
+        result=request_reconnect(args.root)
+        print(json.dumps(result,ensure_ascii=False))
+        return 0 if result["ok"] else 1
     elif args.command == "pair":
         from .provisioning import pair_device
         from .storage import Database
@@ -279,9 +320,8 @@ def main(argv=None) -> int:
         cfg.port = args.port
         db = Database(cfg.db_path)
         try:
-            result=pair_device(cfg,db,args.serial_port,"","")
-            print(json.dumps({"ok":True,"code":"USB_PAIRED","message":"设备授权成功",
-                              "hint":"请在设备第2屏连接这台 Mac，然后在菜单中选择蓝牙设备","data":result},ensure_ascii=False))
+            result=pair_device(cfg,db,args.serial_port,"","",force=args.force)
+            print(json.dumps(usb_pair_result(result),ensure_ascii=False))
         finally:
             db.close()
     elif args.command == "export":
@@ -294,17 +334,8 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except Exception as exc:
-        command=next((arg for arg in sys.argv if arg in ("scan","pair","select-device","enable-cdp")),None)
+        command=next((arg for arg in sys.argv if arg in ("scan","pair","select-device","reconnect","enable-cdp")),None)
         if command is None:
             raise
-        if command == "scan":
-            from .ble_bridge import connection_error
-            info=connection_error(exc,"scanning")
-            result={"ok":False,"code":info["error_code"],"message":info["message"],"hint":info["hint"]}
-        else:
-            result={"ok":False,"code":"USB_PAIR_FAILED" if command == "pair" else "OPERATION_FAILED",
-                    "message":"USB 授权失败" if command == "pair" else "操作未能完成",
-                    "hint":"请检查 USB 数据线、设备唤醒状态及端口是否被其他程序占用" if command == "pair" else "请查看诊断状态并重试",
-                    "detail":str(exc)[:180]}
-        print(json.dumps(result,ensure_ascii=False))
+        print(json.dumps(operation_error(command,exc),ensure_ascii=False))
         raise SystemExit(1)

@@ -1,6 +1,7 @@
 #ifndef DESKMATE_POWER_UI_H
 #define DESKMATE_POWER_UI_H
 #include "lvgl.h"
+#include "ui_update.h"
 #include "power_hold.h"
 #include <stdio.h>
 
@@ -12,7 +13,7 @@ static lv_obj_t *power_overlay, *power_ring, *power_seconds, *power_hint, *power
 static lv_obj_t *power_label(lv_obj_t *parent, const char *text, int y,
                               const lv_font_t *font, uint32_t color) {
     lv_obj_t *label = lv_label_create(parent);
-    lv_label_set_text(label, text);
+    ui_label_set_text(label, text);
     lv_obj_set_style_text_font(label, font, 0);
     lv_obj_set_style_text_color(label, lv_color_hex(color), 0);
     lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
@@ -61,19 +62,19 @@ static void power_ui_render(void) {
     }
     if (!power_overlay) power_ui_create();
     lv_obj_move_foreground(power_overlay);
-    lv_obj_set_style_opa(power_overlay, power_hold.opacity, 0);
+    ui_obj_set_opa(power_overlay, power_hold.opacity);
     lv_arc_set_value(power_ring, (int)power_hold.progress_ms);
     /* Keep the arc at 20ms resolution; only the label snaps to seconds. */
     unsigned seconds = power_hold.progress_ms / 1000;
     if (seconds != power_last_seconds) {
         char text[12];
         snprintf(text, sizeof(text), "%us", seconds);
-        lv_label_set_text(power_seconds, text);
+        ui_label_set_text(power_seconds, text);
         power_last_seconds = seconds;
     }
     if (power_hold.down != power_last_down) {
-        lv_label_set_text(power_hint, power_hold.down ? "HOLD 3s TO POWER OFF" : "POWER OFF CANCELLED");
-        lv_label_set_text(power_instruction, power_hold.down ? "RELEASE TO CANCEL" : "HOLD PWR TO TRY AGAIN");
+        ui_label_set_text(power_hint, power_hold.down ? "HOLD 3s TO POWER OFF" : "POWER OFF CANCELLED");
+        ui_label_set_text(power_instruction, power_hold.down ? "RELEASE TO CANCEL" : "HOLD PWR TO TRY AGAIN");
         power_last_down = power_hold.down;
     }
 }

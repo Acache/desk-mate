@@ -212,6 +212,12 @@ class BilibiliAdapter(ActionAdapter):
                 caps.reasons[action] = (
                     "macOS Accessibility permission is required for the host process or mac/bin/ax_helper"
                 )
+        # Selecting a visible video has its own CDP input + playback-readback
+        # implementation. Do not deny that path because an unrelated AX probe
+        # is false, or because no player window has been opened yet.
+        if cdp_player.control_available():
+            caps.available.add("bilibili.play")
+            caps.reasons.pop("bilibili.play", None)
         return caps
 
     # ------------------------------------------------------------------
@@ -663,14 +669,15 @@ class BilibiliAdapter(ActionAdapter):
         Prefers the floating player page; falls back to the main window for
         search/home pages. Returns None when CDP is unavailable.
         """
-        if not cdp_player.available():
+        if not cdp_player.control_available():
             return None
         # Whichever window is in front is what the user is looking at.
         front_is_main = False
+        front = ""
         try:
             windows = self._helper("cgwindows", timeout=6).get("windows") or []
             front = str((windows[0] or {}).get("name") or "") if windows else ""
-            front_is_main = "哔哩哔哩 (" in front
+            front_is_main = front == "哔哩哔哩" or "哔哩哔哩 (" in front
         except Exception:
             pass
 
@@ -684,14 +691,14 @@ class BilibiliAdapter(ActionAdapter):
             except Exception:
                 return None
 
-        # A dedicated search window (search.html) wins when it is open: that is
-        # the page the user is looking at after 搜索.
-        search = read("search.html")
-        if search and search.get("search_results"):
-            return search
-        if front_is_main:
-            return search or read("index.html") or read("player.html")
-        return read("player.html") or search or read("index.html")
+        candidates = {marker: read(marker) for marker in ("index.html","search.html","player.html")}
+        focused=[v for v in candidates.values() if v and v.get("focused")]
+        if len(focused)==1:
+            return focused[0]
+        order=("index.html","search.html","player.html") if front_is_main or not front else ("player.html","index.html","search.html")
+        for marker in order:
+            if candidates[marker]: return candidates[marker]
+        return None
 
     def _duration_seconds(self) -> int | None:
         """Total video length from the public API (more reliable than OCR)."""
@@ -863,11 +870,14 @@ class BilibiliAdapter(ActionAdapter):
             binding = resolved.binding
             params_bv = resolved.params.get("bv")
             if params_bv:
-                # Use the BV itself; the public API lookup only added a network
-                # round-trip before the same press-url navigation.
-                title = str(params_bv)
+                page = getattr(context, "page_context", None) or {}
+                items = [item for key in ("home_results", "search_results", "episodes", "recommendations")
+                         for item in page.get(key, []) if isinstance(item, dict)]
+                title = next((str(item.get("title") or "") for item in items
+                              if item.get("bvid") == params_bv), "")
                 return PreparedAction(resolved, {
                     "video_id": str(params_bv), "title": title, "mode": "bv", "query": title,
+                    "source_url": page.get("url"),
                 }, now)
             snapshot_id = resolved.params.get("search_result_id") or binding.get("search_result_id")
             index = int(resolved.params.get("index", 1))
@@ -1028,13 +1038,23 @@ class BilibiliAdapter(ActionAdapter):
                                          {"bvid": shown, "expected": target})
             if action == "bilibili.play":
                 expected = str(p.get("video_id", ""))
+                if cdp_player.control_available():
+                    result = cdp_player.play_visible_video(expected, source_url=p.get("source_url"),
+                                                           timeout=max(.1, min(25.0, deadline-time.time())))
+                    # A click must not be repeated through AX. Likewise, a
+                    # readable page with a missing bound card is stale, even
+                    # when AX could find that BV in a different window.
+                    if (result.get("clicked") or result.get("error") in {"visible_target_missing", "playback_deadline"}
+                            or not self.accessibility_trusted()):
+                        return InvocationReceipt(prepared, started, time.time(), bool(result.get("clicked")), result)
                 title = p.get("title", "")
                 query = str(p.get("query") or title)
                 t0 = time.perf_counter()
-                if not self._on_search_page():
+                if p.get("mode") != "bv" and not self._on_search_page():
                     self._search_ui(query)
                 t1 = time.perf_counter()
-                pressed = self._press_video(expected, query, p.get("ui_index"))
+                pressed = (self._helper("press-url", "--url", f"https://www.bilibili.com/video/{expected}", timeout=12)
+                           if p.get("mode") == "bv" else self._press_video(expected, query, p.get("ui_index")))
                 if not pressed.get("ok"):
                     return InvocationReceipt(prepared, started, time.time(), False,
                                              {"error": "result_not_pressable"})
@@ -1126,7 +1146,7 @@ class BilibiliAdapter(ActionAdapter):
                                     output={"ui_summary": summary},
                                     evidence={"verified": True, "already": True}, latency_ms=latency)
             return ActionResult(step_index=step, status=StepState.FAILED,
-                                code=ErrorCode.TARGET_STALE if "no_player" in raw else ErrorCode.ACTION_FAILED,
+                                code=ErrorCode.TARGET_STALE if "no_player" in raw or raw.get("error") == "visible_target_missing" else ErrorCode.ACTION_FAILED,
                                 evidence={"error": str(raw.get("error", ""))[:120]}, latency_ms=latency)
         if action == "bilibili.open":
             if self.app_running():
@@ -1159,6 +1179,21 @@ class BilibiliAdapter(ActionAdapter):
         if action == "bilibili.play":
             expected_bv = (receipt.prepared.prepared or {}).get("video_id")
             observed_bv = raw.get("bvid")
+            if raw.get("via") == "cdp-visible-card":
+                if (raw.get("playing_verified") and raw.get("ok") and expected_bv == observed_bv
+                        and float(raw.get("time_after", 0)) > float(raw.get("time_before", 0))):
+                    self._save_player(observed_bv, False)
+                    return ActionResult(step_index=step, status=StepState.SUCCEEDED,
+                                        output={"video_id": observed_bv,
+                                                "player_generation": self._last_player["generation"]},
+                                        evidence={"playing": True, "bvid": observed_bv, "via": "cdp-visible-card",
+                                                  "position_before_ms": int(raw["time_before"] * 1000),
+                                                  "position_after_ms": int(raw["time_after"] * 1000)},
+                                        latency_ms=latency)
+                return ActionResult(step_index=step, status=StepState.OUTCOME_UNKNOWN,
+                                    code=ErrorCode.OUTCOME_UNKNOWN,
+                                    evidence={"via": "cdp-visible-card", "error": raw.get("error", "playback_not_verified"),
+                                              "observed_bvid": observed_bv}, latency_ms=latency)
             shown = str(raw.get("window_title", ""))
             expected_title = str((receipt.prepared.prepared or {}).get("title", ""))
             if raw.get("error") == "result_not_pressable":

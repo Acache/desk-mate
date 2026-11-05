@@ -30,6 +30,9 @@ tmp_half_done.md
 *.key
 *.crt
 *.p12
+*.pfx
+*.keychain-db
+keychain-password
 *.wav
 *.aiff
 *.log

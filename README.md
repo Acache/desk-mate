@@ -20,6 +20,14 @@ Development now focuses on iteration and feature expansion. The default voice ac
 See [progress, evidence and backlog](docs/STATUS.md) and the [documentation index](docs/README.md).
 A host service being stopped at a later check does not undo that delivery status.
 
+The 2026-11-05 baseline adds global two-stage dimming, animation improvements and a
+finger-tracked Connections drawer. The macOS app is **0.3.2 build 14** at the fixed
+`build/usability-release/Desk-Mate.app` path, with stable local signing, native permission
+checks, context-based video selection and USB authorization that preserves the running
+board. See the [current delivery record](docs/STATUS.md) and
+[USB authorization / daily reconnect guide](docs/USB_AUTHORIZATION.md).
+
+
 ## Why
 
 Keyboard shortcuts are fast but blind. Phone apps are flexible but require picking up a phone.
@@ -48,9 +56,16 @@ Design constraints that shaped the implementation:
 | 3 — Voice | Push-to-talk Bilibili control with cancel, plus a feedback overlay | BLE (shared with media) or TLS WebSocket → local host service |
 
 All three screens and their overlays dim to 50% over one second after 10 seconds
-without input. Touch, swipes, or BOOT/KEY/PWR input immediately restore full brightness
+without input, then dim to 25% over one second after 60 seconds without input.
+Touch, swipes, or BOOT/KEY/PWR input immediately restore full brightness
 and retain their normal actions; holding an input keeps the display bright.
 Timers, animations and other functions continue while dimmed.
+
+Pull down from the flat top-center arrow on any screen for
+Bluetooth devices, Wi-Fi setup and voice transport/computer settings. Back returns
+one level; swipe up returns to the original screen. Pull past halfway before
+releasing to open/close; release earlier to return to the previous position. Configuration opens
+when voice is idle. Media playback/volume and voice recording/cancel stay on their pages.
 
 Bluetooth pairing, switching, rename/forget and reconnect settings: [Bluetooth guide](docs/BLUETOOTH.md).
 
@@ -280,7 +295,7 @@ button produces a transcribed command in `cli status`.
 ### Verify
 
 ```bash
-PYTHONPATH=mac/src .venv/bin/python -m pytest mac/tests -q   # host unit + integration
+VOICE_ASSISTANT_DISABLE_DISCOVERY=1 PYTHONPATH=mac/src .venv/bin/python -m pytest mac/tests -q   # host unit + integration
 PYTHONPATH=mac/src .venv/bin/python -m voice_assistant.cli doctor
 ```
 
@@ -317,7 +332,7 @@ Pin map: [`firmware/desk-mate-app/pinout.md`](firmware/desk-mate-app/pinout.md)
 Buttons: BOOT = GPIO9, KEY = GPIO10, PWR = AXP2101 PEK. Actions are page-owned:
 on Voice, hold KEY to talk, press BOOT twice to prepare/confirm replay, and tap PWR to cancel/back.
 Globally, hold PWR for 4 seconds to power off. After the first second a floating ring
-counts 0s–3s; release to rewind (up to 2s), then fade (1s). Cancelled holds never
+counts 0s–3s; release to rewind (up to 2s), then dismiss immediately at zero. Cancelled holds never
 trigger page taps. Cold power-on remains PMIC controlled (AXP2101 supports at most
 2s for its power-on threshold).
 See the [full button map](firmware/desk-mate-app/pinout.md).

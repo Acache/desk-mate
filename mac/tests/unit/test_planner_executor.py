@@ -268,3 +268,28 @@ def test_executor_journals_started_before_effect(env):
     steps = db.steps(cid)
     assert steps[0]["started_at"] is not None
     assert steps[0]["completed_at"] is not None
+
+
+@pytest.mark.parametrize("remaining,expected", [(90.0, 25.0), (7.0, 7.0)])
+def test_video_load_budget_is_longer_but_respects_command_deadline(env, remaining, expected):
+    _, db, device_id, fake, executor = env
+    from voice_assistant.contracts import R1_ACTIONS
+    now = time.time()
+    executor.clock = lambda: now
+    ctx = context(now=now)
+    proposal = prop([st(0, "bilibili.play", {"bv": "BV1LqJC6iEZV"})])
+    cid = seed_command(db, device_id, {"actions": [{"action": "bilibili.play", "params": {"bv": "BV1LqJC6iEZV"}, "after": []}]})
+    plan = build_plan(proposal, command_id=cid, device_id=device_id,
+                      enabled_actions=R1_ACTIONS, context=ctx)
+    deadlines = []
+    original_invoke = fake.invoke
+    def invoke(prepared, deadline):
+        deadlines.append(deadline)
+        # The externally committed action still has the existing too_late
+        # cancellation contract during media loading, without blocking its ACK.
+        assert db.cancel(cid, "user")[0] == "too_late"
+        return original_invoke(prepared, deadline)
+    fake.invoke = invoke
+    outcome = executor.execute(plan, cid, ctx, deadline=now + remaining)
+    assert deadlines == [now + expected]
+    assert outcome.state is CommandState.SUCCEEDED

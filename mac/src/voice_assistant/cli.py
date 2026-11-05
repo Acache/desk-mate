@@ -96,13 +96,18 @@ def cmd_doctor(args) -> int:
 
 def cmd_pair(args) -> int:
     from .provisioning import choose_port, pair_device
+    from .app_runtime import usb_pair_result
     cfg, db = _ctx(args)
-    port = choose_port(args.port)
-    summary = pair_device(
-        cfg, db, port, args.ssid, args.password, args.manual_host, args.name,
-    )
-    _print({"paired": True, "port": port, **summary})
-    db.close()
+    try:
+        port = choose_port(args.port)
+        summary = pair_device(
+            cfg, db, port, args.ssid, args.password, args.manual_host, args.name,force=args.force,
+        )
+        result=usb_pair_result(summary)
+        _print({"paired": not summary.get("unchanged",False), "port": port, **summary,
+                "code":result["code"],"message":result["message"],"hint":result["hint"]})
+    finally:
+        db.close()
     return 0
 
 
@@ -286,6 +291,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--password", default="", help="WiFi password")
     p.add_argument("--manual-host", help="Mac LAN IP or hostname hint")
     p.add_argument("--name", default="Desk-Mate ESP32-C6")
+    p.add_argument("--force", action="store_true", help="explicitly replace the current server's USB device credential")
     p.set_defaults(func=cmd_pair)
 
     p = sub.add_parser("run", help="run the authenticated WSS service")

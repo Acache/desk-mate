@@ -1,10 +1,12 @@
 #include "voice_hosts.h"
 #include "voice_host_model.h"
 #include "provisioning.h"
+#include "../media_ble/ble_voice_bindings.h"
 #include <Preferences.h>
 #include <freertos/semphr.h>
 #include <stdio.h>
 #include <string.h>
+#include <ctype.h>
 
 static VoiceHostCatalog catalog;
 static char added_id[37];
@@ -123,6 +125,7 @@ bool vc_hosts_save(const VoiceConfig *cfg,const char *name) {
  char k[8];key(k,"cfg",slot);
  if(ok) {
   ok=write_config(p,k,*saved);
+  if(ok){char pending[8];key(pending,"bind",slot);ok=p.putString(pending,cfg->device_id)>0;}
   if(ok) {
    bool fresh=!c.hosts[slot].present;c.hosts[slot].present=true;snprintf(c.hosts[slot].id,37,"%s",cfg->server_id);
    if(fresh)ascii_name(c.hosts[slot].name,name,slot);
@@ -138,6 +141,57 @@ bool vc_hosts_save(const VoiceConfig *cfg,const char *name) {
  if(ok){Preferences network;if(network.begin("va_cfg",true)){char ssid[33],pass[65];bool empty=!read_network(network,ssid,pass);network.end();if(empty&&cfg->ssid[0])ok=vc_hosts_network(cfg->ssid,cfg->password);}}
  return ok;
 }
+static bool pending_binding(Preferences &p,int slot,const VoiceConfig &cfg) {
+ char k[8];key(k,"bind",slot);
+ return !strcmp(p.getString(k,"").c_str(),cfg.device_id);
+}
+bool vc_hosts_binding_pending(int slot,const char *expected_device_id) {
+ if(!store_lock||slot<0||slot>=VH_CAPACITY||!expected_device_id||strlen(expected_device_id)!=36||
+    xSemaphoreTake(store_lock,pdMS_TO_TICKS(100))!=pdTRUE)return false;
+ VoiceConfig *current=(VoiceConfig *)calloc(1,sizeof(VoiceConfig));Preferences p;bool ok=false;
+ if(current&&p.begin("va_hosts",true)){
+  char k[8];key(k,"cfg",slot);
+  ok=read_config(p,k,current)&&!strcmp(current->device_id,expected_device_id)&&pending_binding(p,slot,*current);
+  p.end();
+ }
+ free(current);xSemaphoreGive(store_lock);return ok;
+}
+static bool binding_peer_ok(const char *address,uint8_t type) {
+ if(!address||strlen(address)!=17||type>1)return false;
+ bool nonzero=false,not_broadcast=false;
+ for(int i=0;i<17;i++){
+  unsigned char c=(unsigned char)address[i];
+  if(i%3==2){if(c!=':')return false;}
+  else {if(!isxdigit(c))return false;if(c!='0')nonzero=true;if(c!='f'&&c!='F')not_broadcast=true;}
+ }
+ return nonzero&&not_broadcast;
+}
+bool vc_hosts_finalize_binding(int slot,const VoiceConfig *expected,const char *peer_address,
+                              uint8_t peer_type,bool complete_proof_verified) {
+ if(!complete_proof_verified||!expected||!config_ok(*expected)||!binding_peer_ok(peer_address,peer_type)||
+    !store_lock||slot<0||slot>=VH_CAPACITY||xSemaphoreTake(store_lock,pdMS_TO_TICKS(100))!=pdTRUE)return false;
+ VoiceConfig *current=(VoiceConfig *)calloc(1,sizeof(VoiceConfig));Preferences p;bool ok=false;
+ if(current&&p.begin("va_hosts",false)){
+  char k[8];key(k,"cfg",slot);
+  ok=read_config(p,k,current)&&!strcmp(current->device_id,expected->device_id)&&!strcmp(current->server_id,expected->server_id);
+  uint8_t token_diff=0;
+  if(ok)for(size_t i=0;i<sizeof(current->token);i++)token_diff|=(uint8_t)current->token[i]^(uint8_t)expected->token[i];
+  ok=ok&&!token_diff;
+  if(ok){
+   bool pending=pending_binding(p,slot,*current);char bound[37];
+   bool other=bv_binding_get(peer_address,peer_type,bound)&&strcmp(bound,current->server_id);
+   ok=!other||pending;
+   // Lock order is host store -> binding store. No binding operation may call
+   // back into the host store while holding its own lock.
+   // Consume first after proof verification: if binding persistence fails,
+   // fail closed rather than leave reusable authority to overwrite more peers.
+   if(ok&&pending){key(k,"bind",slot);ok=p.remove(k);}
+   if(ok)ok=bv_binding_set(peer_address,peer_type,current->server_id);
+  }
+  p.end();
+ }
+ free(current);xSemaphoreGive(store_lock);return ok;
+}
 bool vc_hosts_remember(int slot) {
  if(!store_lock||xSemaphoreTake(store_lock,pdMS_TO_TICKS(100))!=pdTRUE)return false;
  Preferences p;bool ok=p.begin("va_hosts",false);
@@ -152,7 +206,7 @@ bool vc_hosts_edit(const VoiceHostRequest *r) {
   char k[8];
   if(r->op==VH_RENAME) {key(k,"name",i);char n[VH_NAME_BYTES];ascii_name(n,r->name,i);ok=p.putString(k,n)>0;if(ok)memcpy(c.hosts[i].name,n,sizeof(n));}
   else if(r->op==VH_DEFAULT){ok=p.putInt("boot",i)>0;if(ok)c.preferred=i;}
-  else if(r->op==VH_FORGET){key(k,"cfg",i);ok=p.remove(k);if(ok){key(k,"name",i);p.remove(k);vh_remove(&c,r->id);if(c.preferred<0)p.putInt("boot",-1);p.putInt("last",c.active);}}
+  else if(r->op==VH_FORGET){key(k,"cfg",i);ok=p.remove(k);if(ok){key(k,"name",i);p.remove(k);key(k,"bind",i);p.remove(k);vh_remove(&c,r->id);if(c.preferred<0)p.putInt("boot",-1);p.putInt("last",c.active);}}
   p.end();if(ok){c.revision++;publish(c);}
  }
  xSemaphoreGive(store_lock);return ok;

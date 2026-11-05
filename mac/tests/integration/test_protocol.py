@@ -186,3 +186,34 @@ def test_fragmented_json_rejected(service):
         msg = ws.receive_json()
         assert msg["type"] == "error"
         assert msg["code"] == "PROTOCOL_ERROR"
+
+
+@pytest.mark.parametrize('text,model_used', [('播放第二个视频',False),('给我挑个适合现在看的',True)])
+def test_home_context_stream_executes_without_any_search(service,text,model_used):
+    client,cfg,db,device_id,token,fake,stt,decision,app=service
+    items=[{'bvid':'BV1xx411c7mD','title':'第一段视频'}, {'bvid':'BV1yy411c7mD','title':'第二段视频'}]
+    stt.text=text;fake.state.app_open=True
+    ctx=app.state.voice.pipeline.ctx
+    ctx.context_reader=lambda:{'page':'home','home_results':items}
+    ctx.refresh_player=lambda:None
+    decision.proposal=proposal('bilibili.play',{'bv':items[0]['bvid']})
+    with client.websocket_connect('/v1/remote',headers=headers(device_id,token)) as ws:
+        hello(ws,cfg,device_id)
+        cid=str(uuid.uuid4())
+        ws.send_json({'v':1,'type':'begin','msg_id':2,'command_id':cid,'kind':'audio',
+            'format':{'encoding':'s16le','rate':16000,'channels':1},'trigger':'esp32_ptt'})
+        assert ws.receive_json()['type']=='begin_ack'
+        blocks,pcm=frames()
+        for block in blocks:ws.send_bytes(block)
+        digest=hashlib.sha256(pcm).hexdigest()
+        ws.send_json({'v':1,'type':'seal','msg_id':3,'command_id':cid,'frame_count':len(blocks),'pcm_bytes':len(pcm),'sha256':digest})
+        while ws.receive_json()['type']!='seal_ack':pass
+        ws.send_json({'v':1,'type':'commit','msg_id':4,'command_id':cid,'sha256':digest})
+        while True:
+            result=ws.receive_json()
+            if result['type']=='result':break
+        assert result['state']=='SUCCEEDED',result
+    assert fake.state.invocations[0][0]=='bilibili.play'
+    assert bool(decision.calls)==model_used
+    if model_used:assert decision.calls[0][1].page_context['page']=='home'
+    else:assert fake.state.current_video==items[1]['bvid']

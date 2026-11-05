@@ -1,6 +1,6 @@
 # 文档索引
 
-> 更新：2026-11-01。B 站 R1 链路已打通，后续在三页固件基线上迭代。
+> 更新：2026-11-05。三页固件与 Mac App 0.3.2 build 14 为当前交付基线；现状与待办统一查看 STATUS.md。
 
 ## 阅读顺序
 
@@ -33,3 +33,29 @@
 2026-10-17 原版设计稿未在当前仓库找到完整文件，现有 MASTER_SPEC 于 2026-10-25 从代码重建。旧会话可补充设计背景，不把“当前未找到原文件”写成无法再次核验的绝对丢失结论。
 
 - [语音电脑管理](VOICE_COMPUTERS.md)：第 3 屏英文界面、最多 5 台 Mac、USB 追加授权、切换、网络与用户验收。
+- [USB 授权与日常重连](USB_AUTHORIZATION.md)：何时需要 USB、重复添加复用记录、明确重新授权及避免 USB 控制线复位；[2026-11-05 实测记录](USB_AUTHORIZATION_VALIDATION_2026-11-05.md)。
+
+- [2026-11-05 发布、权限及上下文统一约定](RELEASE_AND_CONTEXT_2026-11-05.md)：固定原发布路径、正常桌面应用、轻量权限重检，以及当前页面优先的直接/模型路由。
+
+## 文件职责与验证入口
+
+| 路径 | 内容 |
+|---|---|
+| `firmware/desk-mate-app/` | 唯一上板固件；页面、全局连接抽屉、调光及 BLE/语音实现 |
+| `firmware/test/`、`tests/` | 固件协议/存储、计时、关机、调光回归与主机桩 |
+| `tools/lv_sim/` | LVGL 8/9 模拟器、交互测试和实际 32KiB 内存池检查 |
+| `mac/app/` | 原生 App 界面、权限、通知及版本源 `version.json` |
+| `mac/src/voice_assistant/` | 服务、上下文/执行、BLE/USB、数据库与迁移 |
+| `mac/scripts/` | 构建/固定路径更新、本机签名、helper 和明确触发的实测工具 |
+| `mac/tests/` | 主机单元与协议/TLS 集成回归 |
+| `spec/` | 当前技术契约；`docs/superpowers/` 保存带日期的方案及计划 |
+| `.learnings/`、`AGENTS.md` | 排障经验与后续开发约定 |
+| `build/`、`release/`、本机 Application Support | 忽略的构建、报告、模型或私有运行数据；不作为源码提交 |
+
+本轮专题记录按功能保留，不移动固定 App 发布目录：
+
+- [动画 A](ANIMATION_A_VALIDATION.md)、[动画 B 与全局连接页](CONNECTIONS_B_VALIDATION.md)、[界面与通知调整](UI_REFINEMENT_VALIDATION_2026-11-05.md)。
+- [Mac 发布、权限与 B 站上下文执行](RELEASE_AND_CONTEXT_2026-11-05.md)。
+- [USB 授权与重连验收](USB_AUTHORIZATION_VALIDATION_2026-11-05.md)。
+
+自动回归：`VOICE_ASSISTANT_DISABLE_DISCOVERY=1 PYTHONPATH=mac/src .venv/bin/python -m pytest mac/tests -q`；原生/UI 回归：`cmake --build build/sim -j 4` 后运行 `ctest --test-dir build/sim --output-on-failure`，首次配置参见 [模拟器指南](../tools/lv_sim/README.md)。实板工具会操作设备或播放内容，应按各专题说明明确选择目标，不作为普通提交前检查自动执行。

@@ -47,10 +47,19 @@ class BleController:
         self.state,self.connector = state,connector
         self.task = None
         self.address = None
+        self.name = ""
         self.lock = asyncio.Lock()
         self.closed = False
 
     async def select(self,address,name="",persist=True):
+        return await self._change(address,name,persist,reconnect=False)
+
+    async def reconnect(self):
+        # Resolve the current target under the same lock as selection. A stale
+        # UI request must not reconnect a device that another request replaced.
+        return await self._change(None,"",False,reconnect=True)
+
+    async def _change(self,address,name,persist,reconnect):
         try:
             address=validate_address(address)
         except ValueError as exc:
@@ -58,11 +67,26 @@ class BleController:
         async with self.lock:
             if self.closed:
                 return failure("SERVICE_STOPPING","服务正在停止","请等停止完成后再启动服务")
-            if address == self.address and self.task is not None and not self.task.done() and not self.task.cancelling():
+            if reconnect:
+                address=self.address
+                if not address:
+                    return failure("BLE_NO_DEVICE","尚未选择蓝牙设备","请先选择设备，再重新连接；已有授权无需重复 USB 添加")
+                name=self.name
+            if address and not name:
+                if address == self.address:
+                    name=self.name
+                else:
+                    try:
+                        prefs=json.loads((self.state.cfg.root/"desktop.json").read_text())
+                        if isinstance(prefs,dict) and validate_address(prefs.get("ble_address")) == address and isinstance(prefs.get("ble_name"),str):
+                            name=prefs["ble_name"][:80]
+                    except (OSError,ValueError,TypeError):
+                        pass
+            if not reconnect and address == self.address and self.task is not None and not self.task.done() and not self.task.cancelling():
                 return {"ok":True,"code":"BLE_ALREADY_SELECTED","address":address,
                         "message":"正在维护该设备连接","authenticated":bool(self.state.ble_status.get("authenticated"))}
             if self.state.db.active_command():
-                return failure("COMMAND_BUSY","正在处理语音指令，暂时不能切换设备","请等当前录音、执行或确认结束后重试")
+                return failure("COMMAND_BUSY","正在处理语音指令，暂时不能更改连接","请等当前录音、执行或确认结束后重试")
             self.state.ble_switching=True
             try:
                 self.state.ble_status.update(phase="switching",authenticated=False)
@@ -86,12 +110,13 @@ class BleController:
                         self.state.ble_status={"enabled":False,"phase":"disconnected","authenticated":False}
                         return failure("SETTINGS_WRITE_FAILED","无法保存设备设置","请检查应用数据目录的磁盘空间与写入权限")
                 self.address=address
+                self.name=name[:80] if address else ""
                 self.state.ble_status={"enabled":bool(address),"phase":"connecting" if address else "disconnected",
-                                       "authenticated":False,"address":address,"device_name":name[:80]}
+                                       "authenticated":False,"address":address,"device_name":self.name}
                 if address:
                     self.task=asyncio.create_task(self._connect(address))
-                return {"ok":True,"code":"BLE_CONNECTING" if address else "BLE_DISCONNECTED",
-                        "address":address,"message":"正在连接并认证设备" if address else "已断开蓝牙输入",
+                return {"ok":True,"code":("BLE_RECONNECTING" if reconnect else "BLE_CONNECTING") if address else "BLE_DISCONNECTED",
+                        "address":address,"message":("正在重新连接并验证原有授权" if reconnect else "正在连接并认证设备") if address else "已断开蓝牙输入",
                         "authenticated":False}
             finally:
                 # A stuck old disconnect must not reopen the begin gate while
@@ -136,12 +161,17 @@ async def start_control_server(state):
             if len(raw)>2048:
                 raise ValueError("控制请求过长")
             request=json.loads(raw)
-            if not isinstance(request,dict) or "address" not in request or set(request)-{"action","address","name"} or request.get("action") != "select_ble":
+            if not isinstance(request,dict):
                 raise ValueError("不支持的本机控制请求")
-            name=request.get("name","")
-            if not isinstance(name,str) or len(name)>80:
-                raise ValueError("设备名称无效")
-            result=await state.ble_controller.select(request.get("address"),name)
+            if request.get("action") == "reconnect_ble" and set(request)=={"action"}:
+                result=await state.ble_controller.reconnect()
+            elif request.get("action") == "select_ble" and "address" in request and not set(request)-{"action","address","name"}:
+                name=request.get("name","")
+                if not isinstance(name,str) or len(name)>80:
+                    raise ValueError("设备名称无效")
+                result=await state.ble_controller.select(request.get("address"),name)
+            else:
+                raise ValueError("不支持的本机控制请求")
         except (ValueError,asyncio.TimeoutError) as exc:
             result=failure("INVALID_REQUEST","本机控制请求无效或超时","请重新选择设备")
         except Exception:
@@ -168,11 +198,19 @@ def request_selection(root,address,name="",timeout=8):
         address=validate_address(address)
     except ValueError as exc:
         return failure("INVALID_DEVICE",str(exc))
+    return _request_control(root,{"action":"select_ble","address":address,"name":name},timeout)
+
+
+def request_reconnect(root,timeout=8):
+    return _request_control(root,{"action":"reconnect_ble"},timeout)
+
+
+def _request_control(root,request,timeout):
     try:
         with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as client:
             client.settimeout(timeout)
             client.connect(str(control_path(root)))
-            client.sendall(json.dumps({"action":"select_ble","address":address,"name":name},ensure_ascii=False).encode()+b"\n")
+            client.sendall(json.dumps(request,ensure_ascii=False).encode()+b"\n")
             data=b""
             while b"\n" not in data and len(data)<4096:
                 chunk=client.recv(4096-len(data))

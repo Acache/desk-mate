@@ -9,10 +9,15 @@
 | 目标 | 用途 |
 |---|---|
 | `deskmate` | LVGL 9：SDL 交互窗口、测试、截图 |
-| `deskmate_v8` | 可选 LVGL 8.4：硬件 UI 渲染检查，仅支持测试和截图 |
+| `deskmate_v8` | 可选 LVGL 8.4：硬件 UI 渲染检查，支持测试、截图和重绘量分析 |
 | `timer_test` | 不依赖硬件的计时器状态模型测试 |
 
 ## 构建与测试
+
+`SDL_VIDEODRIVER=dummy build/sim/deskmate_v8 --profile-ui` 会统计固定场景的
+重绘像素量和提交次数，覆盖切屏、手指拖动、语音取消条、音波、反馈、滚轮、
+关机进度/淡出及蓝牙管理页。模拟器没有 SPI、音频和 BLE 负载，这些数字不能
+当作设备实际 FPS。A 版前后结果见 [验证记录](../../docs/ANIMATION_A_VALIDATION.md)。
 
 需要 CMake、C 编译器、SDL2 和 LVGL 源码。当前默认 LVGL 9 路径为仓库外部依赖目录 `_lv_sim/lvgl`；不存在时显式传入路径。不要将下载的依赖或构建产物提交到仓库。
 

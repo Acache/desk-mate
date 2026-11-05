@@ -191,13 +191,13 @@ void bsp_lvgl_init(I2cMasterBus &i2cbus) {
   /*LVGL INIT*/
   lv_init();
   idle_brightness_activity(&idle_brightness, lv_tick_get());
-  /* Two 20-line buffers keep double buffering and DMA completion semantics
-   * while freeing ~57 KiB for the C6 voice/TLS workload. */
-  lv_color_t *buf1 = (lv_color_t *)heap_caps_malloc(BSP_LCD_H_RES * 10 * sizeof(lv_color_t), MALLOC_CAP_DMA);
-  lv_color_t *buf2 = (lv_color_t *)heap_caps_malloc(BSP_LCD_H_RES * 10 * sizeof(lv_color_t), MALLOC_CAP_DMA);
+  /* Conservative B trial: 12 lines per DMA buffer adds 3,840 bytes versus
+   * the 10-line baseline; keep most RAM available for voice/TLS. */
+  lv_color_t *buf1 = (lv_color_t *)heap_caps_malloc(BSP_LCD_H_RES * DESKMATE_DRAW_LINES * sizeof(lv_color_t), MALLOC_CAP_DMA);
+  lv_color_t *buf2 = (lv_color_t *)heap_caps_malloc(BSP_LCD_H_RES * DESKMATE_DRAW_LINES * sizeof(lv_color_t), MALLOC_CAP_DMA);
   assert(buf1);
   assert(buf2);
-  lv_disp_draw_buf_init(&draw_buf, buf1, buf2, BSP_LCD_H_RES * 10);
+  lv_disp_draw_buf_init(&draw_buf, buf1, buf2, BSP_LCD_H_RES * DESKMATE_DRAW_LINES);
 
   lv_disp_drv_init(&disp_drv);
   disp_drv.hor_res = BSP_LCD_H_RES;

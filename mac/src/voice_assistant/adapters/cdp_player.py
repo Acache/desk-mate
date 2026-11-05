@@ -10,6 +10,7 @@ Every method returns a dict with ``ok`` and the value it read back.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 import subprocess
 import time
@@ -48,6 +49,11 @@ def _targets() -> list[dict]:
 
 def available() -> bool:
     return any(PLAYER_URL_MARK in (t.get("url") or "") for t in _targets())
+
+
+def control_available() -> bool:
+    """A home/search page is controllable even before a player is opened."""
+    return any(_bili_target(target) for target in _targets())
 
 
 def status() -> dict:
@@ -231,17 +237,18 @@ class CdpPlayer:
         except Exception:
             pass
 
-    def js(self, expression: str):
+    def js(self, expression: str, *, user_gesture: bool = False):
         msg_id = self._next_id
         self._next_id += 1
         self._ws.send(json.dumps({
             "id": msg_id,
             "method": "Runtime.evaluate",
-            "params": {"expression": expression, "returnByValue": True, "awaitPromise": True},
+            "params": {"expression": expression, "returnByValue": True, "awaitPromise": True,
+                       "userGesture": user_gesture},
         }))
         deadline = time.time() + self.timeout
         while time.time() < deadline:
-            message = json.loads(self._ws.recv())
+            message = json.loads(self._ws.recv(timeout=max(.01, deadline-time.time())))
             if message.get("id") != msg_id:
                 continue
             result = message.get("result", {})
@@ -256,8 +263,10 @@ class CdpPlayer:
         self._ws.send(json.dumps({"id": msg_id, "method": method, "params": params or {}}))
         deadline = time.time() + self.timeout
         while time.time() < deadline:
-            message = json.loads(self._ws.recv())
+            message = json.loads(self._ws.recv(timeout=max(.01, deadline-time.time())))
             if message.get("id") == msg_id:
+                if message.get("error"):
+                    raise CdpError("CDP_ERROR", str(message["error"])[:200])
                 return message.get("result", {})
         raise CdpError("CDP_TIMEOUT", method)
 
@@ -276,6 +285,10 @@ class CdpPlayer:
             time: v?v.currentTime:null,
             duration: v?v.duration:null,
             paused: v?v.paused:null,
+            ready_state: v?v.readyState:null,
+            bvid: new URL(location.href).searchParams.get('bvid') ||
+                  (v && v.getAttribute('data-bvid')) ||
+                  (window.__INITIAL_STATE__ && window.__INITIAL_STATE__.bvid) || null,
             volume: v?v.volume:null,
             like: cls(document.querySelector('.like')),
             like_count: txt(document.querySelector('.like .info-text')),
@@ -297,10 +310,12 @@ class CdpPlayer:
         return str(self.js("document.title || ''") or "")
 
     CONTEXT_JS = r"""(() => {
-      const titleOf = (a) => (a.textContent || '').trim();
+      const titleOf = (a) => (a.getAttribute('title') || a.querySelector('[title]')?.getAttribute('title') || a.textContent || '').trim();
       const collect = (root) => {
         const seen = {};
         [...root.querySelectorAll('a[href*="/video/BV"]')].forEach(a => {
+          const rect=a.getBoundingClientRect();
+          if(!rect.width || !rect.height || rect.bottom<=0 || rect.top>=innerHeight || rect.right<=0 || rect.left>=innerWidth)return;
           const m = (a.href || '').match(/BV[0-9A-Za-z]{10}/);
           if (!m) return;
           const t = titleOf(a);
@@ -312,10 +327,11 @@ class CdpPlayer:
         return Object.values(seen);
       };
       const out = {url: location.href, title: document.title, page: 'other',
-                   search_results: [], episodes: [], recommendations: []};
+                   focused: document.hasFocus(), home_results: [], search_results: [], episodes: [], recommendations: []};
       if (location.href.indexOf('search') >= 0) out.page = 'search';
-      else if (location.href.indexOf('/page/home') >= 0) out.page = 'home';
+      else if (location.href.indexOf('/page/home') >= 0 || location.href.indexOf('index.html') >= 0 && location.hash.indexOf('search') < 0) out.page = 'home';
       else if (location.href.indexOf('player.html') >= 0) out.page = 'player';
+      if (out.page === 'home') out.home_results=collect(document);
       if (out.page === 'search') {
         let items = collect(document);
         const marker = [...document.querySelectorAll('*')].find(e =>
@@ -522,3 +538,100 @@ class CdpPlayer:
         }})()""")
         time.sleep(0.3)
         return {"ok": bool(clicked), "open": open_comments, "via": "cdp"}
+
+
+def _state_bvid(state: dict) -> str | None:
+    value = str(state.get("bvid") or "")
+    if re.fullmatch(r"BV[0-9A-Za-z]{10}", value):
+        return value
+    match = re.search(r"(?:bvid=|/video/)(BV[0-9A-Za-z]{10})", str(state.get("href") or ""))
+    return match.group(1) if match else None
+
+
+def play_visible_video(bvid: str, *, source_url: str | None = None, timeout: float = 25.0) -> dict:
+    """Click the exact visible card and observe this BV actually playing.
+
+    This never searches for a replacement, fabricates a coordinate or considers
+    a successful Input call proof of playback. Only the selected local Bilibili
+    page's visible anchor supplies the click coordinate.
+    """
+    if not re.fullmatch(r"BV[0-9A-Za-z]{10}", bvid):
+        return {"ok": False, "clicked": False, "error": "invalid_video_id", "via": "cdp-visible-card"}
+    deadline = time.monotonic() + timeout
+    targets = [t for t in _targets() if _bili_target(t) and t.get("webSocketDebuggerUrl")]
+    if source_url:
+        # A bound card must still exist on the page used to resolve the ordinal.
+        # The same BV in a different window is not a replacement for that page.
+        targets = [t for t in targets if t.get("url") == source_url]
+    targets.sort(key=lambda t: (not (source_url and t.get("url") == source_url),
+                                PLAYER_URL_MARK in str(t.get("url") or "")))
+    clicked = False
+    previous: dict[str, dict] = {}
+    after: dict = {}
+    try:
+        for target in targets:
+            if time.monotonic() >= deadline:
+                return {"ok": False, "clicked": False, "error": "playback_deadline", "via": "cdp-visible-card"}
+            with CdpPlayer(target["webSocketDebuggerUrl"], timeout=min(2.0, max(.1, deadline-time.monotonic()))) as page:
+                hit = page.js("""(() => {
+                  const bv=%s;
+                  const links=[...document.querySelectorAll('a[href*="/video/"]')].filter(a=>{
+                    const match=(a.href||'').match(/BV[0-9A-Za-z]{10}/);
+                    const r=a.getBoundingClientRect();
+                    return match&&match[0]===bv&&r.width>0&&r.height>0&&r.top<innerHeight&&r.bottom>0&&r.left<innerWidth&&r.right>0;
+                  }).map(a=>({a,r:a.getBoundingClientRect()})).sort((a,b)=>b.r.width*b.r.height-a.r.width*a.r.height);
+                  if(!links.length)return null;
+                  const {a,r}=links[0],left=Math.max(0,r.left),right=Math.min(innerWidth,r.right),top=Math.max(0,r.top),bottom=Math.min(innerHeight,r.bottom);
+                  return {x:(left+right)/2,y:(top+bottom)/2,title:(a.getAttribute('title')||a.textContent||'').trim().slice(0,120)};
+                })()""" % json.dumps(bvid))
+                if not hit:
+                    continue
+                clicked = True
+                page.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": hit["x"], "y": hit["y"]})
+                for kind in ("mousePressed", "mouseReleased"):
+                    page.call("Input.dispatchMouseEvent", {"type": kind, "x": hit["x"], "y": hit["y"],
+                                                           "button": "left", "buttons": 1 if kind == "mousePressed" else 0,
+                                                           "clickCount": 1})
+                break
+        if not clicked:
+            return {"ok": False, "clicked": False, "error": "visible_target_missing", "via": "cdp-visible-card"}
+        requested_resume: set[str] = set()
+        while time.monotonic() < deadline:
+            # A stale/empty player shell can precede the newly opened window in
+            # /json. Inspect every player and compare progress within one target.
+            players = [t for t in _targets() if PLAYER_URL_MARK in str(t.get("url") or "")
+                       and t.get("webSocketDebuggerUrl")]
+            for target in players:
+                if time.monotonic() >= deadline:
+                    break
+                ws = target["webSocketDebuggerUrl"]
+                try:
+                    with CdpPlayer(ws, timeout=min(2.0, max(.1, deadline-time.monotonic()))) as player:
+                        observed = player.state()
+                        if _state_bvid(observed) != bvid:
+                            continue
+                        after = observed
+                        if not after.get("video"):
+                            continue
+                        if after.get("paused") is True and ws not in requested_resume:
+                            requested_resume.add(ws)
+                            # play() can remain pending while media buffers. Do
+                            # not block the readback loop on that promise.
+                            player.js("(()=>{const v=document.querySelector('video');if(v)v.play().catch(()=>{});return true})()", user_gesture=True)
+                        before = previous.get(ws, {})
+                        if (before.get("time") is not None and after.get("time") is not None
+                                and after.get("paused") is False
+                                and float(after["time"]) > float(before["time"]) + 0.05):
+                            return {"ok": True, "clicked": True, "bvid": bvid, "playing_verified": True,
+                                    "time_before": before["time"], "time_after": after["time"],
+                                    "href": after.get("href"), "via": "cdp-visible-card"}
+                        previous[ws] = after
+                except Exception:
+                    # Renderer creation/navigation can briefly invalidate a
+                    # target. This is not proof of failure or permission denial.
+                    continue
+            time.sleep(.2)
+        return {"ok": False, "clicked": True, "bvid": _state_bvid(after),
+                "error": "playback_not_verified", "via": "cdp-visible-card"}
+    except Exception as exc:
+        return {"ok": False, "clicked": clicked, "error": type(exc).__name__, "via": "cdp-visible-card"}

@@ -19,3 +19,13 @@ Avoid retrying the affected UI integration in this session. Use bounded CLI chec
 - Related Files: mac/app/DeskMate.swift, mac/src/voice_assistant/app_runtime.py
 
 ---
+
+## [ERR-20261104-DISPLAY] display experiment and C/C++ UI checks
+
+**Logged**: 2026-11-04
+**Status**: resolved
+**Area**: frontend
+
+- Increasing LVGL circle-cache slots from 2 to 4 exhausted the actual 32KB pool in circ_calc_aa4. Rejected that variant; retained two slots.
+- The C simulator accepted BleSnapshot initialization with {0}, while Arduino C++ rejected conversion of integer zero to its enum field. Use explicit memset for the shared C/C++ snapshot, and require the firmware compile in addition to native tests.
+- An added peer-name assertion initially used a stale simulator peer with bt_read unset. Bind the fake source explicitly before asserting current-device rendering; the revised regression now passes.

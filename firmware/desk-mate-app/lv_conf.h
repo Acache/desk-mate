@@ -1,3 +1,4 @@
+#include "display_tuning.h"
 /**
  * @file lv_conf.h
  * Configuration file for v8.3.11
@@ -120,7 +121,7 @@
     * The circumference of 1/4 circle are saved for anti-aliasing
     * radius * 4 bytes are used per circle (the most often used radiuses are saved)
     * 0: to disable caching */
-    #define LV_CIRCLE_CACHE_SIZE 2 /* Bound circular mask caches on the 32KiB pool. */
+    #define LV_CIRCLE_CACHE_SIZE DESKMATE_CIRCLE_CACHE_SLOTS /* Bound circular mask caches on the 32KiB pool. */
 #endif /*LV_DRAW_COMPLEX*/
 
 /**

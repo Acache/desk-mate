@@ -15,7 +15,7 @@ def test_out_of_scope_is_not_reported_as_search_expired():
 
 
 def test_needs_search_versus_multiple_actions():
-    assert result_detail(CommandState.FAILED, ErrorCode.CLARIFY_NEEDED, "请先搜索一个视频，再说第几个") == "SEARCH FIRST"
+    assert result_detail(CommandState.FAILED, ErrorCode.CLARIFY_NEEDED, "请先搜索一个视频，再说第几个") == "NEED VISIBLE TARGET"
     assert result_detail(CommandState.FAILED, ErrorCode.CLARIFY_NEEDED, "这句话包含多个动作，请分开说，避免误操作") == "SAY ONE COMMAND"
 
 

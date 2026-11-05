@@ -122,7 +122,7 @@ def _step_binding(
                 "expires_at": int(search.expires_at),
             }
         if params.get("query"):
-            raise PlanRejection(ErrorCode.CLARIFY_NEEDED, "请先搜索，再说播放第几个")
+            raise PlanRejection(ErrorCode.CLARIFY_NEEDED, "当前无法确认播放目标，请补充可见标题或序号")
     if action in {"bilibili.danmaku_on", "bilibili.danmaku_off"}:
         if not player:
             raise PlanRejection(ErrorCode.TARGET_STALE, "没有可用的播放器")

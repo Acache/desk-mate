@@ -364,6 +364,25 @@ func main() {
         emit(["ok": true, "trusted": AXIsProcessTrusted(), "bundle": BILI_BUNDLE])
         return
     }
+    // Window metadata does not require Accessibility. Keep this outside the
+    // AX trust gate and do not activate/reorder the user's windows to inspect it.
+    if command == "cgwindows" {
+        guard let app=findApp() else {emit(["ok":false,"windows":[]]);return}
+        let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+        var rows: [[String: Any]] = []
+        for w in list {
+            let pid = (w[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value ?? 0
+            if pid != app.processIdentifier { continue }
+            let num = (w[kCGWindowNumber as String] as? NSNumber)?.intValue ?? 0
+            let name = w[kCGWindowName as String] as? String ?? ""
+            let bounds = w[kCGWindowBounds as String] as? [String: Any] ?? [:]
+            rows.append(["id": num, "name": name, "bounds": bounds,
+                         "layer": (w[kCGWindowLayer as String] as? NSNumber)?.intValue ?? 0,
+                         "alpha": (w[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 0])
+        }
+        emit(["ok": true, "pid": app.processIdentifier, "windows": rows])
+        return
+    }
     if command == "launch" {
         let launched = launchApp()
         if let app = findApp() { activate(app) }
@@ -451,20 +470,6 @@ func main() {
         CGEvent(mouseEventSource: src, mouseType: .mouseMoved,
                 mouseCursorPosition: CGPoint(x: mx, y: my), mouseButton: .left)?.post(tap: .cghidEventTap)
         emit(["ok": true, "x": mx, "y": my])
-    case "cgwindows":
-        let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
-        var rows: [[String: Any]] = []
-        for w in list {
-            let pid = (w[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value ?? 0
-            if pid != app.processIdentifier { continue }
-            let num = (w[kCGWindowNumber as String] as? NSNumber)?.intValue ?? 0
-            let name = w[kCGWindowName as String] as? String ?? ""
-            let bounds = w[kCGWindowBounds as String] as? [String: Any] ?? [:]
-            rows.append(["id": num, "name": name, "bounds": bounds,
-                         "layer": (w[kCGWindowLayer as String] as? NSNumber)?.intValue ?? 0,
-                         "alpha": (w[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 0])
-        }
-        emit(["ok": true, "pid": app.processIdentifier, "windows": rows])
     case "ensure-window":
         activate(app)
         usleep(250_000)

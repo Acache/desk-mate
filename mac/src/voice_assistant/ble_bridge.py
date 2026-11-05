@@ -202,8 +202,10 @@ async def authenticate(channel, state):
         return value
     await send({'type':'ble_auth_start', 'server_id':server, 'nonce':host_nonce})
     challenge = await read('ble_challenge')
-    if challenge.get('server_id') != server or challenge.get('epoch') != channel.epoch:
-        raise WireError('server or epoch mismatch')
+    if challenge.get('server_id') != server:
+        raise WireError('authentication target changed')
+    if challenge.get('epoch') != channel.epoch:
+        raise WireError('authentication epoch changed')
     device = challenge['device_id']
     key = state.db.ble_auth_key(device)
     if key is None:
@@ -216,11 +218,39 @@ async def authenticate(channel, state):
     await send({'type':'ble_auth_complete', 'proof':proof(key, 'complete', text)})
     return device, key
 
+
+async def _check_idle_epoch(client, channel, db, timeout=3.0):
+    """Notice a credential/session update without disturbing audio transfer.
+
+    USB updates can invalidate the peripheral epoch while keeping the HID link
+    and the old server credential alive. Waiting for remote-session idle expiry
+    delays recovery; the read-only status characteristic is authoritative.
+    """
+    if db.active_command():
+        return
+    try:
+        raw = await asyncio.wait_for(client.read_gatt_char(STATUS), timeout)
+    except asyncio.TimeoutError as exc:
+        raise WireError('BLE status timeout') from exc
+    if len(raw) != 14:
+        raise WireError('invalid BLE status')
+    version, flags, mtu, epoch, generation, maximum = struct.unpack('<BBHIIH', raw)
+    if version != 1 or maximum != MAX_MESSAGE:
+        raise WireError('unsupported BLE protocol')
+    if epoch != channel.epoch:
+        raise WireError('authentication epoch changed')
+
 def connection_error(exc,phase):
     message=str(exc).lower()
+    if "ble status timeout" in message:
+        return {"error_code":"BLE_CHANNEL_TIMEOUT","message":"设备通道状态暂时无响应，正在重试","hint":"等待自动恢复或点击重新连接，无需重复 USB 授权"}
     if "usb authorization" in message:
         return {"error_code":"BLE_AUTH_REQUIRED","message":"这块设备尚未授权给当前服务端","hint":"通过 USB 连接新板子，选择“通过 USB 授权设备”"}
-    if "proof mismatch" in message or "server or epoch mismatch" in message:
+    if "authentication epoch changed" in message or "server or epoch mismatch" in message:
+        return {"error_code":"BLE_AUTH_REFRESH","message":"蓝牙会话已更新，正在重新验证原有授权","hint":"等待自动重试或点击重新连接，无需重复 USB 授权"}
+    if "authentication target changed" in message:
+        return {"error_code":"BLE_TARGET_MISMATCH","message":"设备回应的目标电脑与当前服务端不一致","hint":"请在设备上选择这台 Mac，然后重新连接"}
+    if "proof mismatch" in message:
         return {"error_code":"BLE_AUTH_MISMATCH","message":"设备与当前服务端的授权不匹配","hint":"确认选择的是目标板子，并通过 USB 重新授权"}
     if "page 2" in message:
         return {"error_code":"BLE_SELECT_MAC","message":"设备尚未选中这台 Mac","hint":"请在设备第2屏选择并连接当前 Mac，然后等待自动重试"}
@@ -231,7 +261,13 @@ def connection_error(exc,phase):
     if any(word in message for word in ("powered off","poweredoff","bluetooth is off")):
         return {"error_code":"BLUETOOTH_OFF","message":"Mac 蓝牙已关闭","hint":"打开系统蓝牙后会自动重试"}
     if isinstance(exc,(TimeoutError,asyncio.TimeoutError)):
-        return {"error_code":"BLE_TIMEOUT","message":"设备连接或认证超时，正在自动重连","hint":"保持设备唤醒并靠近 Mac；持续失败时在设备第2屏重新点击连接这台 Mac（已授权设备无需再次 USB 授权）"}
+        if phase == "resolving":
+            return {"error_code":"BLE_DEVICE_UNAVAILABLE","message":"等待设备上线","hint":"设备未被发现；需要使用时再开启设备并连接当前 Mac"}
+        if phase == "authenticating":
+            return {"error_code":"BLE_AUTH_TIMEOUT","message":"设备认证超时，正在重试","hint":"请检查设备授权及蓝牙连接；详细信息可在诊断中查看"}
+        if phase in ("services", "status", "subscribing"):
+            return {"error_code":"BLE_CHANNEL_TIMEOUT","message":"语音通道准备超时，正在重试","hint":"设备已连接，但语音通道尚未就绪"}
+        return {"error_code":"BLE_CONNECT_TIMEOUT","message":"蓝牙连接超时，正在重试","hint":"请检查设备是否开机、在附近且已连接当前 Mac"}
     return {"error_code":"BLE_CONNECTION_FAILED","message":"蓝牙连接暂时失败，正在重试","hint":"检查设备电源、距离和第2屏连接；详细信息可在诊断中查看"}
 
 
@@ -240,7 +276,7 @@ async def run_connector(state, address):
     state.ble_status.update(enabled=True,phase="connecting",authenticated=False,address=address)
     logged_error = None
     while True:
-        state.ble_status.update(phase="resolving", authenticated=False)
+        state.ble_status.update(phase="resolving", authenticated=False, device_id=None)
         channel = None
         try:
             device = await resolve_device(address)
@@ -274,7 +310,8 @@ async def run_connector(state, address):
                 channel.worker = asyncio.create_task(channel._pump())
                 state.ble_status.update(phase="authenticating", mtu=mtu, generation=generation)
                 device_id, key = await authenticate(channel, state)
-                state.ble_status.update(phase="authenticated", authenticated=True, last_error=None,
+                state.ble_status.update(phase="authenticated", authenticated=True, device_id=device_id,
+                                        epoch=epoch, last_error=None,
                                         error_code=None,message="蓝牙语音输入已连接",hint=None)
                 logged_error = None
                 log.info('BLE companion authenticated for device %s', device_id)
@@ -286,6 +323,7 @@ async def run_connector(state, address):
                         current = state.db.ble_auth_key(device_id)
                         if current is None or not hmac.compare_digest(current, key):
                             break
+                        await _check_idle_epoch(client, channel, state.db)
                 finally:
                     await channel.close()
                     session.cancel()

@@ -255,7 +255,7 @@ def test_row_synonym_does_not_fall_back_to_ordinal():
     from voice_assistant.intent import rule_based_proposal
     p = rule_based_proposal("点击第三行第一个视频", _ctx())
     assert p is not None and not p.actions
-    assert "搜索" in p.clarification
+    assert "行列位置" in p.clarification
 
 
 def test_close_home_mute_and_p_aliases():
